@@ -1,0 +1,17 @@
+{
+  "name": "mrp-planner-project",
+  "private": true,
+  "scripts": {
+    "install": "npm --prefix mrp-planner install",
+    "dev": "npm --prefix mrp-planner run dev",
+    "build": "npm --prefix mrp-planner run build",
+    "preview": "npm --prefix mrp-planner run preview",
+    "server": "node server/server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "odbc": "^2.5.0"
+  }
+}

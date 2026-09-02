@@ -1,9 +1,23 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import {
-  LayoutDashboard, Package, Boxes, ListTree, CalendarClock, PlayCircle,
+  LayoutDashboard, Package, ListTree, PlayCircle,
   Plus, Trash2, AlertTriangle, CheckCircle2, Loader2, RotateCcw, ChevronRight,
-  CalendarRange
+  CalendarRange, ClipboardList, Users, LogOut, KeyRound
 } from "lucide-react";
+import PlannerDashboard from "./dashboard/PlannerDashboard";
+import ProductionMRP from "./production/ProductionMRP";
+import { deriveProductionMRP } from "./production/deriveProductionMRP";
+import BlowMouldingPlanningBoard from "./planning/BlowMouldingPlanningBoard";
+import ProductionActuals from "./actuals/ProductionActuals";
+import { addCalendarDays, mondayOf } from "./planning/planningBoardUtils";
+import { fetchSysproBom, fetchSysproInventory, mergeSysproInventory } from "./api/sysproApi";
+import { deriveMaterialReconciliation } from "./reconciliation/deriveMaterialReconciliation";
+import atdLogo from "./assets/atd-logo.png";
+import { authenticate, clearSession, initializeAuth, saveSession, saveUsers } from "./auth/authService";
+import { can } from "./auth/permissions";
+import { ChangePassword, Login, UsersPage } from "./auth/AuthScreens";
+import { PRODUCTION_LINES, entryProductionLine } from "./production/productionLines";
+import SysproBomExplorer from "./bom/SysproBomExplorer";
 
 /* --------------------------------------------------------------------- */
 /*  Local storage shim — replaces Claude.ai's window.storage sandbox API */
@@ -42,9 +56,9 @@ const T = {
   rule: "#C9C2AE",
   muted: "#746C5C",
   text: "#232323",
-  copper: "#B5641F",
-  copperDark: "#8C4A15",
-  copperTint: "#F1E3D3",
+  copper: "#0868B2",
+  copperDark: "#004A86",
+  copperTint: "#DCEEFF",
   brick: "#A6362B",
   brickTint: "#F3E1DE",
   green: "#2F6F4E",
@@ -83,6 +97,8 @@ const FONTS = (
 /* ---------------------------------------------------------------------- */
 const uid = () => "id_" + Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4);
 const todayISO = () => new Date().toISOString().slice(0, 10);
+const withProductionFields = (item) => ({ ...item, bWip01Soh: Number(item.bWip01Soh) || 0, bRaw01Soh: Number(item.bRaw01Soh) || 0, bScr01Qty: Number(item.bScr01Qty) || 0, bReg01Qty: Number(item.bReg01Qty) || 0 });
+const withBuildQty = (plan) => ({ ...plan, entries: (plan.entries || []).map((entry) => ({ ...entry, buildQty: Number(entry.buildQty) || 0 })) });
 
 function getMonday(d) {
   const date = new Date(d);
@@ -209,7 +225,7 @@ const BM_DATA = {"items":[{"id":"120032","code":"120032","description":"Steel Me
 
 function loadBlowMoldingData() {
   return {
-    items: BM_DATA.items.map((i) => ({ ...i })),
+    items: BM_DATA.items.map(withProductionFields),
     boms: BM_DATA.boms.map((b) => ({ ...b })),
     demands: BM_DATA.demands.map((d) => ({ ...d })),
     openOrders: BM_DATA.openOrders.map((o) => ({ ...o })),
@@ -243,7 +259,12 @@ function seedData() {
     { id: uid(), itemId: iSteel, qty: 50, dueDate: addDays(new Date(), 4).toISOString().slice(0, 10), type: "PO", reference: "PO-5510" },
     { id: uid(), itemId: iMotor, qty: 20, dueDate: addDays(new Date(), 10).toISOString().slice(0, 10), type: "PO", reference: "PO-5518" },
   ];
-  return { items, boms, demands, openOrders };
+  return {
+    items: items.map(withProductionFields),
+    boms,
+    demands,
+    openOrders,
+  };
 }
 
 const MACHINE_PART_OPTIONS = {
@@ -283,22 +304,9 @@ const PART_NUMBER_OPTIONS = Object.values(MACHINE_PART_OPTIONS).flat();
 
 function buildPlanningWeek(startDate = new Date()) {
   const start = getMonday(startDate);
-  const days = Array.from({ length: 7 }, (_, idx) => addDays(start, idx));
-  const weekdayNames = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
-  const machineCycle = ["BM01", "BM02", "BM03", "BM04", "BM05", "BM01", "BM02"];
-
   return {
     weekStart: start.toISOString().slice(0, 10),
-    entries: days.map((date, index) => ({
-      id: uid(),
-      day: date.toISOString().slice(0, 10),
-      weekday: weekdayNames[index],
-      shift: "SHIFT 01",
-      machine: machineCycle[index] || "BM01",
-      partNumber: "",
-      target: index < 2 ? "Output target" : "",
-      status: "Planned",
-    })),
+    entries: [],
   };
 }
 
@@ -336,16 +344,45 @@ function Badge({ children, tone }) {
 /*  Main App                                                              */
 /* ---------------------------------------------------------------------- */
 export default function MRPPlanner() {
+  const [auth, setAuth] = useState({ loading: true, users: [], currentUser: null });
+  const [changePassword, setChangePassword] = useState(false);
+  useEffect(() => { initializeAuth().then(({ users, currentUser }) => setAuth({ loading: false, users, currentUser })); }, []);
+  async function login(username, password) { const result = await authenticate(auth.users, username, password); setAuth({ loading: false, users: result.users, currentUser: result.user }); }
+  function updateUsers(users) {
+    if (!users.some((user) => user.isActive && user.role === "ADMIN")) { window.alert("At least one active administrator is required."); return false; }
+    saveUsers(users); setAuth((state) => ({ ...state, users, currentUser: users.find((u) => u.id === state.currentUser?.id) || state.currentUser })); return true;
+  }
+  function logout() { clearSession(); setAuth((state) => ({ ...state, currentUser: null })); setChangePassword(false); }
+  async function changeCurrentPassword(passwordHash) { const now = new Date().toISOString(); const users = auth.users.map((u) => u.id === auth.currentUser.id ? { ...u, passwordHash, mustChangePassword: false, updatedAt: now } : u); const currentUser = users.find((u) => u.id === auth.currentUser.id); saveUsers(users); saveSession(currentUser.id); setAuth({ loading: false, users, currentUser }); setChangePassword(false); }
+  if (auth.loading) return <div className="auth-page">Loading…</div>;
+  if (!auth.currentUser) return <Login onLogin={login} bootstrap={auth.users.length === 1 && auth.users[0].mustChangePassword} />;
+  return <><MRPPlannerCore currentUser={auth.currentUser} users={auth.users} onSaveUsers={updateUsers} onLogout={logout} onChangePassword={() => setChangePassword(true)} />{(changePassword || auth.currentUser.mustChangePassword) && <ChangePassword user={auth.currentUser} required={auth.currentUser.mustChangePassword} onSave={changeCurrentPassword} onCancel={() => setChangePassword(false)} />}</>;
+}
+
+function MRPPlannerCore({ currentUser, users, onSaveUsers, onLogout, onChangePassword }) {
   const [tab, setTab] = useState("dashboard");
   const [items, setItems] = useState([]);
   const [boms, setBoms] = useState([]);
+  const [bomStatus, setBomStatus] = useState({ connected: false, loading: false, lastUpdated: null, error: null });
   const [demands, setDemands] = useState([]);
   const [openOrders, setOpenOrders] = useState([]);
-  const [planning, setPlanning] = useState(buildDefaultPlanningWeek());
+  const [productionActuals, setProductionActuals] = useState([]);
+  const [sysproTransactions, setSysproTransactions] = useState([]);
+  const [openingWipBalances, setOpeningWipBalances] = useState([]);
+  const [closingWipBalances, setClosingWipBalances] = useState([]);
+  const [reconciliationTolerances, setReconciliationTolerances] = useState([]);
+  const [sysproInventory, setSysproInventory] = useState([]);
+  const [sysproStatus, setSysproStatus] = useState("offline");
+  const [sysproLastUpdated, setSysproLastUpdated] = useState(null);
+  const initialWeek = mondayOf(new Date());
+  const [activeWeekStart, setActiveWeekStart] = useState(initialWeek);
+  const [planningWeeks, setPlanningWeeks] = useState({ [initialWeek]: { weekStart: initialWeek, entries: [] } });
+  const [selectedProductionLine, setSelectedProductionLine] = useState("blowMoulding");
   const [horizon, setHorizon] = useState(10);
   const [loaded, setLoaded] = useState(false);
   const [saveState, setSaveState] = useState("idle"); // idle | saving | saved
   const [ledgerItemId, setLedgerItemId] = useState(null);
+  const [mrpRunVersion, setMrpRunVersion] = useState(0);
   const saveTimer = useRef(null);
 
   // load
@@ -355,24 +392,39 @@ export default function MRPPlanner() {
         const res = await window.storage.get("mrp-data", false);
         if (res && res.value) {
           const parsed = JSON.parse(res.value);
-          setItems(parsed.items || []);
-          setBoms(parsed.boms || []);
+          setItems((parsed.items || []).map(withProductionFields));
           setDemands(parsed.demands || []);
           setOpenOrders(parsed.openOrders || []);
-          setPlanning(parsed.planning || buildDefaultPlanningWeek());
+          setSysproTransactions(parsed.sysproTransactions || []);
+          setOpeningWipBalances(parsed.openingWipBalances || []);
+          setClosingWipBalances(parsed.closingWipBalances || []);
+          setReconciliationTolerances(parsed.reconciliationTolerances || []);
+          const legacyPlanning = parsed.planning ? withBuildQty(parsed.planning) : buildDefaultPlanningWeek();
+          const storedWeeks = Object.fromEntries(Object.entries(parsed.planningWeeks || {}).map(([key, plan]) => [key, withBuildQty(plan)]));
+          if (!storedWeeks[legacyPlanning.weekStart]) storedWeeks[legacyPlanning.weekStart] = legacyPlanning;
+          const planningEntries = Object.values(storedWeeks).flatMap((plan) => plan.entries || []);
+          const migratedActuals = (parsed.productionActuals || []).map((actual) => {
+            if (actual.planningEntryId) return actual;
+            const linkedPlan = planningEntries.find((entry) => entry.machine === actual.machine && entry.day === actual.day && entry.shift === actual.shift && (!actual.partNumber || entry.partNumber === actual.partNumber));
+            return linkedPlan ? { id: actual.id, planningEntryId: linkedPlan.id, actualMouldQty: actual.actualMouldQty, comment: actual.comment || "", updatedAt: actual.updatedAt || new Date().toISOString() } : actual;
+          });
+          setProductionActuals(migratedActuals);
+          setPlanningWeeks(storedWeeks);
+          setActiveWeekStart(parsed.activeWeekStart || legacyPlanning.weekStart);
           setHorizon(parsed.horizon || 10);
+          setSelectedProductionLine(parsed.selectedProductionLine || "blowMoulding");
         } else {
           const seed = loadBlowMoldingData();
           setItems(seed.items);
-          setBoms(seed.boms);
           setDemands(seed.demands);
           setOpenOrders(seed.openOrders);
-          setPlanning(buildDefaultPlanningWeek());
+          const plan = buildDefaultPlanningWeek();
+          setPlanningWeeks({ [plan.weekStart]: plan });
+          setActiveWeekStart(plan.weekStart);
         }
       } catch (e) {
         const seed = seedData();
         setItems(seed.items);
-        setBoms(seed.boms);
         setDemands(seed.demands);
         setOpenOrders(seed.openOrders);
       }
@@ -389,7 +441,7 @@ export default function MRPPlanner() {
       try {
         await window.storage.set(
           "mrp-data",
-          JSON.stringify({ items, boms, demands, openOrders, planning, horizon }),
+          JSON.stringify({ items, demands, openOrders, planning, planningWeeks, activeWeekStart, selectedProductionLine, horizon, productionActuals, sysproTransactions, openingWipBalances, closingWipBalances, reconciliationTolerances }),
           false
         );
         setSaveState("saved");
@@ -398,17 +450,69 @@ export default function MRPPlanner() {
       }
     }, 600);
     return () => clearTimeout(saveTimer.current);
-  }, [items, boms, demands, openOrders, planning, horizon, loaded]);
+  }, [items, demands, openOrders, planningWeeks, activeWeekStart, selectedProductionLine, horizon, productionActuals, sysproTransactions, openingWipBalances, closingWipBalances, reconciliationTolerances, loaded]);
+
+  const planning = useMemo(() => { const source = planningWeeks[activeWeekStart] || { weekStart: activeWeekStart, entries: [] }; return { ...source, entries: (source.entries || []).filter((entry) => entryProductionLine(entry) === selectedProductionLine) }; }, [planningWeeks, activeWeekStart, selectedProductionLine]);
+  const setPlanning = useCallback((value) => {
+    setPlanningWeeks((weeksByStart) => {
+      const full = weeksByStart[activeWeekStart] || { weekStart: activeWeekStart, entries: [] };
+      const scoped = { ...full, entries: (full.entries || []).filter((entry) => entryProductionLine(entry) === selectedProductionLine) };
+      const next = typeof value === "function" ? value(scoped) : value;
+      const otherEntries = (full.entries || []).filter((entry) => entryProductionLine(entry) !== selectedProductionLine);
+      return { ...weeksByStart, [activeWeekStart]: { ...full, ...next, entries: [...otherEntries, ...(next.entries || [])], weekStart: activeWeekStart } };
+    });
+  }, [activeWeekStart, selectedProductionLine]);
+
+  const selectPlanningWeek = useCallback((weekStart) => {
+    setPlanningWeeks((weeksByStart) => weeksByStart[weekStart]
+      ? weeksByStart
+      : { ...weeksByStart, [weekStart]: { weekStart, entries: [] } });
+    setActiveWeekStart(weekStart);
+  }, []);
+
+  const refreshSysproStock = useCallback(async () => {
+    setSysproStatus("loading");
+    try {
+      const inventory = await fetchSysproInventory();
+      setSysproInventory(inventory.data);
+      setSysproStatus("connected");
+      setSysproLastUpdated(new Date());
+    } catch (error) {
+      setSysproStatus("offline");
+    }
+  }, []);
+
+  const refreshSysproBom = useCallback(async () => { setBomStatus((status) => ({ ...status, loading: true, error: null })); try { const result = await fetchSysproBom(); setBoms(result.data); setBomStatus({ connected: true, loading: false, lastUpdated: new Date(), error: null }); } catch (error) { setBomStatus((status) => ({ ...status, connected: false, loading: false, error: error.message })); } }, []);
+
+  useEffect(() => { if (loaded) { refreshSysproStock(); refreshSysproBom(); } }, [loaded, refreshSysproStock, refreshSysproBom]);
+
+  const itemsWithLiveStock = useMemo(
+    () => sysproStatus === "connected" ? mergeSysproInventory(items, sysproInventory) : items,
+    [items, sysproInventory, sysproStatus]
+  );
+
+  const productionMrp = useMemo(
+    () => deriveProductionMRP({ planning, items: itemsWithLiveStock, boms }),
+    [planning, itemsWithLiveStock, boms]
+  );
+  const activeActualsForReconciliation = useMemo(() => {
+    const entriesById = new Map((planning.entries || []).map((entry) => [entry.id, entry]));
+    return productionActuals.filter((actual) => entriesById.has(actual.planningEntryId)).map((actual) => {
+      const entry = entriesById.get(actual.planningEntryId);
+      return entry ? { ...entry, ...actual, partNumber: entry.partNumber, day: entry.day, machine: entry.machine, shift: entry.shift, actualDateTime: `${entry.day}T12:00:00` } : actual;
+    });
+  }, [productionActuals, planning.entries]);
+  const reconciliationPeriod = useMemo(() => ({ day: planning.weekStart, dateFrom: `${planning.weekStart}T00:00:00`, dateTo: `${addCalendarDays(planning.weekStart, 7)}T00:00:00` }), [planning.weekStart]);
+  const materialReconciliation = useMemo(() => deriveMaterialReconciliation({ productionActuals: activeActualsForReconciliation, items, boms, sysproTransactions, openingWipBalances, closingWipBalances, tolerances: reconciliationTolerances, period: reconciliationPeriod }), [activeActualsForReconciliation, items, boms, sysproTransactions, openingWipBalances, closingWipBalances, reconciliationTolerances, reconciliationPeriod]);
+  const reconciliationAvailable = sysproTransactions.length > 0 && openingWipBalances.length > 0 && closingWipBalances.length > 0;
 
   const monday = useMemo(() => getMonday(new Date()), []);
   const weeks = useMemo(
     () => Array.from({ length: horizon }, (_, i) => addDays(monday, i * 7)),
     [horizon, monday]
   );
-  const mrp = useMemo(
-    () => runMRP(items, boms, demands, openOrders, horizon, monday),
-    [items, boms, demands, openOrders, horizon, monday]
-  );
+  const mrpCompatibleBoms = useMemo(() => { const ids = new Map(items.map((item) => [String(item.code || "").trim().toUpperCase(), item.id])); return boms.map((bom, index) => ({ id: `syspro_${index}`, parentId: ids.get(String(bom.parentStockCode || "").trim().toUpperCase()), componentId: ids.get(String(bom.componentStockCode || "").trim().toUpperCase()), qtyPer: bom.qtyPer })).filter((bom) => bom.parentId && bom.componentId); }, [items, boms]);
+  const mrp = useMemo(() => runMRP(items, mrpCompatibleBoms, demands, openOrders, horizon, monday), [items, mrpCompatibleBoms, demands, openOrders, horizon, monday, mrpRunVersion]);
 
   const itemById = useCallback((id) => items.find((i) => i.id === id), [items]);
 
@@ -425,7 +529,6 @@ export default function MRPPlanner() {
   function resetDemo() {
     const seed = seedData();
     setItems(seed.items);
-    setBoms(seed.boms);
     setDemands(seed.demands);
     setOpenOrders(seed.openOrders);
   }
@@ -433,7 +536,6 @@ export default function MRPPlanner() {
   function resetBlowMolding() {
     const seed = loadBlowMoldingData();
     setItems(seed.items);
-    setBoms(seed.boms);
     setDemands(seed.demands);
     setOpenOrders(seed.openOrders);
   }
@@ -448,43 +550,36 @@ export default function MRPPlanner() {
   }
 
   const navItems = [
-    { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
-    { id: "planning", label: "Planning", icon: CalendarRange },
-    { id: "items", label: "Items", icon: Package },
-    { id: "bom", label: "Bill of Materials", icon: ListTree },
-    { id: "demand", label: "Demand", icon: CalendarClock },
-    { id: "orders", label: "Open Orders", icon: Boxes },
-    { id: "ledger", label: "Planning Ledger", icon: PlayCircle },
-  ];
+    { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, permission: "dashboard" },
+    { id: "planning", label: "Planning", icon: CalendarRange, permission: "planning" },
+    { id: "actuals", label: "Production Actuals", icon: CheckCircle2, permission: "actuals" },
+    { id: "production-mrp", label: "Production MRP", icon: ClipboardList, permission: "productionMrp" },
+    { id: "items", label: "Items", icon: Package, permission: "items" },
+    { id: "bom", label: "Bill of Materials", icon: ListTree, permission: "bom" },
+    { id: "ledger", label: "Planning Ledger", icon: PlayCircle, permission: "ledger" },
+    { id: "users", label: "Users", icon: Users, permission: "users" },
+  ].filter((item) => can(currentUser, item.permission));
+  const activeNav = navItems.find((item) => item.id === tab);
 
   return (
-    <div className="plex-sans" style={{ background: T.paper, color: T.text, borderRadius: 8, overflow: "hidden", border: `1px solid ${T.line}` }}>
+    <div className="plex-sans" style={{ width: "100%", minHeight: "100vh", background: T.paper, color: T.text, overflow: "hidden", border: `1px solid ${T.line}` }}>
       {FONTS}
-      <div style={{ display: "flex", minHeight: 560 }}>
+      <div style={{ display: "flex", width: "100%", minHeight: "100vh" }}>
         {/* Sidebar */}
-        <div style={{ width: 200, background: T.ink, color: T.sidebarText, padding: "18px 12px", flexShrink: 0 }}>
+        <div style={{ flex: "0 0 200px", background: T.ink, color: T.sidebarText, padding: "18px 12px" }}>
           <div style={{ padding: "0 8px 18px 8px" }}>
             <div style={{
               width: 120,
-              height: 38,
+              height: 60,
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
               borderRadius: 6,
-              background: "linear-gradient(135deg, #ffffff 0%, #e9e3d7 100%)",
+              background: "#ffffff",
               boxShadow: "inset 0 0 0 1px rgba(27,36,48,0.08)",
               marginBottom: 12,
             }}>
-              <div style={{
-                fontSize: 26,
-                fontWeight: 800,
-                letterSpacing: "-0.08em",
-                lineHeight: 1,
-                color: T.ink,
-                fontFamily: "'IBM Plex Sans', sans-serif",
-              }}>
-                ATD
-              </div>
+              <img src={atdLogo} alt="ATD" style={{ width: 118, height: "auto", display: "block", objectFit: "contain" }} />
             </div>
             <div style={{ fontSize: 15, fontWeight: 600, color: "#fff", letterSpacing: ".01em" }}>Planning Desk</div>
             <div style={{ fontSize: 11, color: T.sidebarTextDim, marginTop: 2 }}>Blow Molding — materials requirements</div>
@@ -523,6 +618,8 @@ export default function MRPPlanner() {
               );
             })}
           </nav>
+
+          <div style={{ marginTop: 20, padding: "0 8px" }}><div style={{ fontSize: 11, color: T.sidebarTextDim, marginBottom: 6 }}>PRODUCTION LINE</div><select value={selectedProductionLine} onChange={(e) => setSelectedProductionLine(e.target.value)} style={{ width: "100%", background: T.inkSoft, color: "#fff", border: "1px solid #3A4557", borderRadius: 3, padding: "6px" }}>{Object.values(PRODUCTION_LINES).map((line) => <option key={line.id} value={line.id}>{line.name}</option>)}</select></div>
 
           <div style={{ marginTop: 24, padding: "0 8px" }}>
             <div style={{ fontSize: 11, color: T.sidebarTextDim, marginBottom: 6 }}>PLANNING HORIZON</div>
@@ -566,37 +663,42 @@ export default function MRPPlanner() {
               </>
             )}
           </div>
+          <div style={{ marginTop: 13, padding: "9px 8px", borderTop: "1px solid #3A4557", fontSize: 11 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, color: sysproStatus === "connected" ? "#9DD6B8" : sysproStatus === "loading" ? T.sidebarText : "#E7A8A2" }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: "currentColor" }} />Syspro: {sysproStatus === "connected" ? "Connected" : sysproStatus === "loading" ? "Connecting…" : "Offline"}</div>
+            <div style={{ color: T.sidebarTextDim, fontSize: 9, marginTop: 4 }}>{sysproLastUpdated ? `Updated ${sysproLastUpdated.toLocaleTimeString()}` : "Using local stock fallback"}</div>
+            <button onClick={refreshSysproStock} disabled={sysproStatus === "loading"} style={{ border: 0, background: "transparent", color: T.sidebarText, padding: "6px 0 0", fontSize: 10, cursor: "pointer" }}><RotateCcw size={10} style={{ verticalAlign: -1, marginRight: 4 }} />Refresh Syspro Stock</button>
+          </div>
+          <div style={{ marginTop: 13, padding: "12px 8px", borderTop: "1px solid #3A4557", fontSize: 11 }}>
+            <div style={{ color: "#fff", fontWeight: 600 }}>{currentUser.fullName}</div><div style={{ color: T.sidebarTextDim, marginTop: 2 }}>{currentUser.role}</div>
+            <button onClick={onChangePassword} style={{ display: "block", border: 0, background: "transparent", color: T.sidebarText, padding: "9px 0 0", cursor: "pointer", fontSize: 10 }}><KeyRound size={11} style={{ verticalAlign: -2, marginRight: 5 }} />Change Password</button>
+            <button onClick={onLogout} style={{ display: "block", border: 0, background: "transparent", color: "#E7A8A2", padding: "8px 0 0", cursor: "pointer", fontSize: 10 }}><LogOut size={11} style={{ verticalAlign: -2, marginRight: 5 }} />Logout</button>
+          </div>
         </div>
 
         {/* Content */}
-        <div style={{ flex: 1, padding: "22px 26px", overflowX: "auto" }}>
+        <div style={{ flex: 1, minWidth: 0, padding: "22px 26px", overflowX: "auto" }}>
+          {!activeNav && <div style={{ padding: 24, background: "#fff", border: `1px solid ${T.line}` }}><h2>Access denied</h2><p>You do not have permission to view this page.</p><button className="mrp-btn mrp-btn-primary" onClick={() => setTab("dashboard")}>Go to Dashboard</button></div>}
+          {activeNav && <>
           {tab === "dashboard" && (
-            <Dashboard
-              items={items}
-              mrp={mrp}
-              exceptions={exceptions}
-              demands={demands}
-              openOrders={openOrders}
-              boms={boms}
-              saveState={saveState}
-              onGoLedger={(id) => { setLedgerItemId(id); setTab("ledger"); }}
-            />
+            <PlannerDashboard planning={planning} productionActuals={productionActuals} productionMrp={productionMrp} materialReconciliation={materialReconciliation} reconciliationAvailable={reconciliationAvailable} sysproStatus={sysproStatus} sysproLastUpdated={sysproLastUpdated} productionLine={selectedProductionLine} />
           )}
-          {tab === "planning" && <PlanningTab planning={planning} setPlanning={setPlanning} />}
-          {tab === "items" && <ItemsTab items={items} setItems={setItems} />}
-          {tab === "bom" && <BomTab items={items} boms={boms} setBoms={setBoms} />}
-          {tab === "demand" && <DemandTab items={items} demands={demands} setDemands={setDemands} />}
-          {tab === "orders" && <OrdersTab items={items} openOrders={openOrders} setOpenOrders={setOpenOrders} />}
+          {tab === "planning" && <BlowMouldingPlanningBoard planning={planning} setPlanning={setPlanning} onWeekChange={selectPlanningWeek} logo={atdLogo} items={items} boms={boms} editable={can(currentUser, "planning", "edit")} currentUserId={currentUser.id} productionLine={selectedProductionLine} bomStatus={bomStatus} onRefreshBom={refreshSysproBom} />}
+          {tab === "actuals" && <ProductionActuals actuals={productionActuals} setActuals={setProductionActuals} planning={planning} onWeekChange={selectPlanningWeek} items={items} boms={boms} sysproTransactions={sysproTransactions} openingWipBalances={openingWipBalances} closingWipBalances={closingWipBalances} tolerances={reconciliationTolerances} editable={can(currentUser, "actuals", "edit")} currentUserId={currentUser.id} productionLine={selectedProductionLine} bomStatus={bomStatus} />}
+          {tab === "production-mrp" && <ProductionMRP planning={planning} items={itemsWithLiveStock} boms={boms} productionMrp={productionMrp} bomStatus={bomStatus} />}
+          {tab === "items" && <fieldset disabled={!can(currentUser, "items", "edit")} style={{ border: 0, padding: 0, margin: 0 }}><ItemsTab items={items} setItems={setItems} /></fieldset>}
+          {tab === "bom" && <SysproBomExplorer boms={boms} status={bomStatus} onRefresh={refreshSysproBom} />}
           {tab === "ledger" && (
             <LedgerTab
               items={items}
-              boms={boms}
+              boms={mrpCompatibleBoms}
               mrp={mrp}
               weeks={weeks}
               ledgerItemId={ledgerItemId}
               setLedgerItemId={setLedgerItemId}
             />
           )}
+          {tab === "users" && <UsersPage users={users} currentUser={currentUser} onSaveUsers={onSaveUsers} />}
+          </>}
         </div>
       </div>
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
@@ -850,6 +952,7 @@ function PlanningTab({ planning, setPlanning }) {
           shift: "SHIFT 01",
           machine: "BM01",
           partNumber: "",
+          buildQty: 0,
           target: "",
           status: "Planned",
         },
@@ -919,14 +1022,15 @@ function PlanningTab({ planning, setPlanning }) {
         </div>
 
         <div style={{ overflowX: "auto", overflowY: "hidden" }}>
-          <table className="mrp-table" style={{ minWidth: 920 }}>
+          <table className="mrp-table" style={{ minWidth: 1020 }}>
             <thead>
               <tr>
                 <th>Day</th>
                 <th>Shift</th>
                 <th>Machine</th>
                 <th>Part Number</th>
-                <th>Target</th>
+                <th style={{ textAlign: "right" }}>Planned Build Qty</th>
+                <th>Target / notes</th>
                 <th>Status</th>
               </tr>
             </thead>
@@ -965,6 +1069,7 @@ function PlanningTab({ planning, setPlanning }) {
                       ))}
                     </select>
                   </td>
+                  <td><input type="number" min="0" className="mrp-input plex-mono" style={{ width: 110, textAlign: "right" }} value={entry.buildQty ?? 0} onChange={(e) => updateEntry(entry.id, "buildQty", e.target.value)} /></td>
                   <td><input className="mrp-input" style={{ width: 180 }} value={entry.target} onChange={(e) => updateEntry(entry.id, "target", e.target.value)} placeholder="Output target / qty / notes" /></td>
                   <td>
                     <select className="mrp-input" value={entry.status} onChange={(e) => updateEntry(entry.id, "status", e.target.value)}>
@@ -991,7 +1096,7 @@ function ItemsTab({ items, setItems }) {
   const [draft, setDraft] = useState(blankItem());
 
   function blankItem() {
-    return { code: "", description: "", type: "Buy", leadTimeDays: 7, safetyStock: 0, lotSize: 0, onHand: 0, uom: "EA" };
+    return { code: "", description: "", type: "Buy", leadTimeDays: 7, safetyStock: 0, lotSize: 0, onHand: 0, bWip01Soh: 0, bRaw01Soh: 0, bScr01Qty: 0, bReg01Qty: 0, uom: "EA" };
   }
 
   function updateItem(id, field, value) {
@@ -1016,8 +1121,9 @@ function ItemsTab({ items, setItems }) {
           <thead>
             <tr>
               <th>Code</th><th>Description</th><th>Type</th><th style={{ textAlign: "right" }}>Lead (d)</th>
-              <th style={{ textAlign: "right" }}>Safety</th><th style={{ textAlign: "right" }}>Lot size</th>
-              <th style={{ textAlign: "right" }}>On hand</th><th>UoM</th><th></th>
+              <th style={{ textAlign: "right" }}>Safety</th><th style={{ textAlign: "right" }}>Pack size</th>
+              <th style={{ textAlign: "right" }}>On hand</th><th style={{ textAlign: "right" }}>B-WIP01</th><th style={{ textAlign: "right" }}>B-RAW01</th>
+              <th style={{ textAlign: "right" }}>B-SCR01</th><th style={{ textAlign: "right" }}>B-REG01</th><th>UoM</th><th></th>
             </tr>
           </thead>
           <tbody>
@@ -1034,6 +1140,10 @@ function ItemsTab({ items, setItems }) {
                 <td><input type="number" className="mrp-input plex-mono" style={{ width: 60, textAlign: "right" }} value={it.safetyStock} onChange={(e) => updateItem(it.id, "safetyStock", e.target.value)} /></td>
                 <td><input type="number" className="mrp-input plex-mono" style={{ width: 60, textAlign: "right" }} value={it.lotSize} onChange={(e) => updateItem(it.id, "lotSize", e.target.value)} /></td>
                 <td><input type="number" className="mrp-input plex-mono" style={{ width: 60, textAlign: "right" }} value={it.onHand} onChange={(e) => updateItem(it.id, "onHand", e.target.value)} /></td>
+                <td><input type="number" className="mrp-input plex-mono" style={{ width: 70, textAlign: "right" }} value={it.bWip01Soh ?? 0} onChange={(e) => updateItem(it.id, "bWip01Soh", e.target.value)} /></td>
+                <td><input type="number" className="mrp-input plex-mono" style={{ width: 70, textAlign: "right" }} value={it.bRaw01Soh ?? 0} onChange={(e) => updateItem(it.id, "bRaw01Soh", e.target.value)} /></td>
+                <td><input type="number" className="mrp-input plex-mono" style={{ width: 70, textAlign: "right" }} value={it.bScr01Qty ?? 0} onChange={(e) => updateItem(it.id, "bScr01Qty", e.target.value)} /></td>
+                <td><input type="number" className="mrp-input plex-mono" style={{ width: 70, textAlign: "right" }} value={it.bReg01Qty ?? 0} onChange={(e) => updateItem(it.id, "bReg01Qty", e.target.value)} /></td>
                 <td><input className="mrp-input plex-mono" style={{ width: 48 }} value={it.uom} onChange={(e) => updateItem(it.id, "uom", e.target.value)} /></td>
                 <td><button onClick={() => removeItem(it.id)} className="mrp-btn" style={{ padding: 5, color: T.muted }}><Trash2 size={14} /></button></td>
               </tr>
@@ -1050,8 +1160,12 @@ function ItemsTab({ items, setItems }) {
           <Field label="Type" w={90}><select className="mrp-input" value={draft.type} onChange={(e) => setDraft({ ...draft, type: e.target.value })}><option>Make</option><option>Buy</option></select></Field>
           <Field label="Lead (d)" w={70}><input type="number" className="mrp-input plex-mono" value={draft.leadTimeDays} onChange={(e) => setDraft({ ...draft, leadTimeDays: e.target.value })} /></Field>
           <Field label="Safety" w={70}><input type="number" className="mrp-input plex-mono" value={draft.safetyStock} onChange={(e) => setDraft({ ...draft, safetyStock: e.target.value })} /></Field>
-          <Field label="Lot size" w={70}><input type="number" className="mrp-input plex-mono" value={draft.lotSize} onChange={(e) => setDraft({ ...draft, lotSize: e.target.value })} /></Field>
+          <Field label="Pack size" w={70}><input type="number" className="mrp-input plex-mono" value={draft.lotSize} onChange={(e) => setDraft({ ...draft, lotSize: e.target.value })} /></Field>
           <Field label="On hand" w={70}><input type="number" className="mrp-input plex-mono" value={draft.onHand} onChange={(e) => setDraft({ ...draft, onHand: e.target.value })} /></Field>
+          <Field label="B-WIP01 SOH" w={80}><input type="number" className="mrp-input plex-mono" value={draft.bWip01Soh} onChange={(e) => setDraft({ ...draft, bWip01Soh: e.target.value })} /></Field>
+          <Field label="B-RAW01 SOH" w={80}><input type="number" className="mrp-input plex-mono" value={draft.bRaw01Soh} onChange={(e) => setDraft({ ...draft, bRaw01Soh: e.target.value })} /></Field>
+          <Field label="B-SCR01 Qty" w={80}><input type="number" className="mrp-input plex-mono" value={draft.bScr01Qty} onChange={(e) => setDraft({ ...draft, bScr01Qty: e.target.value })} /></Field>
+          <Field label="B-REG01 Qty" w={80}><input type="number" className="mrp-input plex-mono" value={draft.bReg01Qty} onChange={(e) => setDraft({ ...draft, bReg01Qty: e.target.value })} /></Field>
           <Field label="UoM" w={56}><input className="mrp-input plex-mono" value={draft.uom} onChange={(e) => setDraft({ ...draft, uom: e.target.value })} /></Field>
           <button className="mrp-btn mrp-btn-primary" onClick={addItem}><Plus size={14} /> Add</button>
         </div>
@@ -1065,6 +1179,8 @@ function ItemsTab({ items, setItems }) {
 /* ---------------------------------------------------------------------- */
 function BomTab({ items, boms, setBoms }) {
   const [draft, setDraft] = useState({ parentId: "", componentId: "", qtyPer: 1 });
+  const [search, setSearch] = useState("");
+  const [expanded, setExpanded] = useState(() => new Set());
 
   function addLine() {
     if (!draft.parentId || !draft.componentId || draft.parentId === draft.componentId) return;
@@ -1077,8 +1193,6 @@ function BomTab({ items, boms, setBoms }) {
   function updateLine(id, field, value) {
     setBoms((prev) => prev.map((b) => (b.id === id ? { ...b, [field]: value } : b)));
   }
-  const codeOf = (id) => items.find((i) => i.id === id)?.code || "—";
-
   const grouped = useMemo(() => {
     const m = {};
     boms.forEach((b) => {
@@ -1088,6 +1202,24 @@ function BomTab({ items, boms, setBoms }) {
     return m;
   }, [boms]);
 
+  const itemsById = useMemo(() => new Map(items.map((item) => [item.id, item])), [items]);
+  const parents = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return items
+      .filter((item) => grouped[item.id])
+      .filter((item) => !query || item.code.toLowerCase().includes(query) || (item.description || "").toLowerCase().includes(query))
+      .sort((a, b) => a.code.localeCompare(b.code));
+  }, [items, grouped, search]);
+
+  function toggleParent(parentId) {
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (next.has(parentId)) next.delete(parentId);
+      else next.add(parentId);
+      return next;
+    });
+  }
+
   return (
     <div>
       <SectionHeader title="Bill of Materials" subtitle="Parent-component structure, with quantity required per one parent unit" />
@@ -1095,33 +1227,42 @@ function BomTab({ items, boms, setBoms }) {
       {items.length === 0 ? (
         <div style={{ color: T.muted, fontSize: 13 }}>Add items first, then define their structure here.</div>
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 18 }}>
-          {items.filter((p) => grouped[p.id]).map((parent) => (
-            <div key={parent.id} style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 6, overflow: "hidden" }}>
-              <div style={{ padding: "9px 14px", borderBottom: `1px solid ${T.line}`, fontSize: 13, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}>
-                <span className="plex-mono">{parent.code}</span>
-                <span style={{ color: T.muted, fontWeight: 400 }}>{parent.description}</span>
-              </div>
-              <table className="mrp-table">
-                <tbody>
-                  {grouped[parent.id].map((b) => (
-                    <tr key={b.id}>
-                      <td style={{ width: 24, color: T.rule }}><ChevronRight size={14} /></td>
-                      <td className="plex-mono">{codeOf(b.componentId)}</td>
-                      <td style={{ color: T.muted }}>{items.find((i) => i.id === b.componentId)?.description}</td>
-                      <td style={{ width: 140 }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "flex-end" }}>
-                          <span style={{ fontSize: 12, color: T.muted }}>qty/parent</span>
-                          <input type="number" className="mrp-input plex-mono" style={{ width: 60, textAlign: "right" }} value={b.qtyPer} onChange={(e) => updateLine(b.id, "qtyPer", e.target.value)} />
-                        </div>
-                      </td>
-                      <td style={{ width: 32 }}><button onClick={() => removeLine(b.id)} className="mrp-btn" style={{ padding: 5, color: T.muted }}><Trash2 size={14} /></button></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ))}
+        <div style={{ marginBottom: 18 }}>
+          <div style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 6, padding: 12, marginBottom: 10 }}>
+            <input className="mrp-input" style={{ width: "100%", maxWidth: 430 }} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search parent stock code or description..." aria-label="Search BOM parents" />
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+            {parents.map((parent) => {
+              const isExpanded = expanded.has(parent.id);
+              const children = grouped[parent.id];
+              return <section key={parent.id} style={{ background: T.card, border: `1px solid ${isExpanded ? T.rule : T.line}`, borderRadius: 6, overflow: "hidden" }}>
+                <button type="button" onClick={() => toggleParent(parent.id)} aria-expanded={isExpanded} style={{ width: "100%", border: 0, background: isExpanded ? "#FBFAF6" : T.card, padding: "10px 13px", cursor: "pointer", display: "flex", alignItems: "center", gap: 11, textAlign: "left", color: T.text }}>
+                  <ChevronRight size={17} style={{ flexShrink: 0, color: T.copper, transform: isExpanded ? "rotate(90deg)" : "none", transition: "transform .12s ease" }} />
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div className="plex-mono" style={{ color: T.ink, fontSize: 14, fontWeight: 700 }}>{parent.code}</div>
+                    <div style={{ color: T.muted, fontSize: 12.5, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{parent.description || "No description"}</div>
+                  </div>
+                  <Badge>{children.length} {children.length === 1 ? "component" : "components"}</Badge>
+                </button>
+                {isExpanded && <div style={{ borderTop: `1px solid ${T.line}`, padding: "0 12px 9px 40px", overflowX: "auto" }}>
+                  <table className="mrp-table" style={{ minWidth: 650 }}>
+                    <thead><tr><th>Child Stock Code</th><th>Description</th><th>UOM</th><th style={{ textAlign: "right" }}>Qty Per</th><th style={{ width: 48 }}>Actions</th></tr></thead>
+                    <tbody>{children.map((bom) => {
+                      const child = itemsById.get(bom.componentId);
+                      return <tr key={bom.id}>
+                        <td className="plex-mono" style={{ fontWeight: 600 }}>{child?.code || "Missing item"}</td>
+                        <td style={{ color: T.muted }}>{child?.description || "Item record not found"}</td>
+                        <td className="plex-mono">{child?.uom || "—"}</td>
+                        <td style={{ textAlign: "right" }}><input type="number" step="any" className="mrp-input plex-mono" aria-label={`Quantity per ${child?.code || "component"}`} style={{ width: 82, textAlign: "right" }} value={bom.qtyPer} onChange={(event) => updateLine(bom.id, "qtyPer", event.target.value)} /></td>
+                        <td><button onClick={() => removeLine(bom.id)} className="mrp-btn" title="Delete BOM component" aria-label={`Delete ${child?.code || "component"}`} style={{ padding: 5, color: T.muted }}><Trash2 size={14} /></button></td>
+                      </tr>;
+                    })}</tbody>
+                  </table>
+                </div>}
+              </section>;
+            })}
+            {parents.length === 0 && <div style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 6, padding: 16, color: T.muted, fontSize: 13 }}>{search ? "No BOM parents match your search." : "No parent BOMs have been defined."}</div>}
+          </div>
         </div>
       )}
 
@@ -1350,7 +1491,7 @@ function LedgerTab({ items, boms, mrp, weeks, ledgerItemId, setLedgerItemId }) {
             </table>
           </div>
           <div style={{ marginTop: 10, fontSize: 11.5, color: T.muted }}>
-            Rows in copper mark planned order releases; red marks a projected on-hand balance below safety stock.
+            Rows in blue mark planned order releases; red marks a projected on-hand balance below safety stock.
           </div>
         </>
       )}
