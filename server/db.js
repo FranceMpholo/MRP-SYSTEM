@@ -1,40 +1,43 @@
-const odbc = require("odbc");
+const sql = require("mssql");
 
-function connectionValue(value) {
-  if (!value) return "";
-  return `{${String(value).replaceAll("}", "}}")}}`;
+function buildConfig(env = process.env) {
+  return {
+    server: env.SYSPRO_SERVER?.trim() || "ATD-SQL01.duys.co.za",
+    database: env.SYSPRO_DATABASE?.trim() || env.SYSPRO_DSN?.trim() || "SysproCompanyAtd",
+    user: env.SYSPRO_USER?.trim() || undefined,
+    password: env.SYSPRO_PASSWORD || "",
+    port: Number(env.SYSPRO_PORT) || 1433,
+    connectionTimeout: Number(env.SYSPRO_CONNECTION_TIMEOUT_MS) || 15000,
+    requestTimeout: Number(env.SYSPRO_REQUEST_TIMEOUT_MS) || 60000,
+    options: {
+      encrypt: env.SYSPRO_ENCRYPT?.toLowerCase() !== "false",
+      trustServerCertificate: env.SYSPRO_TRUST_SERVER_CERTIFICATE?.toLowerCase() !== "false",
+    },
+  };
 }
 
-function buildConnectionString(env = process.env) {
-  // Use this when the complete ODBC string is already known.
-  if (env.SYSPRO_ODBC?.trim()) return env.SYSPRO_ODBC.trim();
-
-  const parts = [`DSN=${env.SYSPRO_DSN?.trim() || "SysproCompanyAtd"}`];
-  if (env.SYSPRO_USER?.trim()) parts.push(`UID=${connectionValue(env.SYSPRO_USER.trim())}`);
-  if (env.SYSPRO_PASSWORD) parts.push(`PWD=${connectionValue(env.SYSPRO_PASSWORD)}`);
-  if (env.SYSPRO_DATABASE?.trim()) parts.push(`DATABASE=${connectionValue(env.SYSPRO_DATABASE.trim())}`);
-  return parts.join(";");
-}
-
-const connectionString = buildConnectionString();
+const config = buildConfig();
 let poolPromise;
 
 async function getPool() {
-  if (!poolPromise) poolPromise = odbc.pool(connectionString);
+  if (!poolPromise) poolPromise = new sql.ConnectionPool(config).connect();
   try { return await poolPromise; }
   catch (error) { poolPromise = undefined; throw error; }
 }
 
-async function query(sql, parameters = []) {
+async function query(queryText, parameters = []) {
+  if (parameters.length) throw new Error("Parameterized queries are not implemented for the SYSPRO adapter.");
   const pool = await getPool();
-  try { return await pool.query(sql, parameters); }
+  try {
+    const result = await pool.request().query(queryText);
+    return result.recordset || [];
+  }
   catch (error) { poolPromise = undefined; throw error; }
 }
 
 async function testConnection() {
-  const pool = await getPool();
-  await pool.query("SELECT 1 AS ConnectionTest");
+  await query("SELECT 1 AS ConnectionTest");
   return true;
 }
 
-module.exports = { query, testConnection, buildConnectionString, connectionName: connectionString.startsWith("DSN=") ? connectionString.split(";")[0] : "SYSPRO_ODBC override" };
+module.exports = { query, testConnection, buildConfig, connectionName: `${config.server}/${config.database}` };

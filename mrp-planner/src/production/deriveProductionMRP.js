@@ -1,5 +1,6 @@
 import { expandPlanningEntry, getParentPair } from "../planning/blowMouldingParentPairs.js";
 import { entryProductionLine } from "./productionLines.js";
+import { getEffectivePlanQty } from "../planning/planQuantities.js";
 
 const number = (value) => Number(value) || 0;
 
@@ -16,10 +17,10 @@ export function deriveProductionMRP({ planning = {}, items = [], boms = [] }) {
   const dataIssues = [];
 
   (planning.entries || []).forEach((entry) => {
-    const buildQty = number(entry.buildQty);
+    const buildQty = getEffectivePlanQty(entry);
     if (!entry.partNumber || buildQty <= 0) return;
     const isThermoforming = entryProductionLine(entry) === "thermoforming";
-    const effectiveEntries = isThermoforming ? [{ parentStockCode: entry.parentStockCode || entry.partNumber, buildQty }] : expandPlanningEntry(entry);
+    const effectiveEntries = isThermoforming ? [{ parentStockCode: entry.parentStockCode || entry.partNumber, buildQty }] : expandPlanningEntry({ ...entry, buildQty });
     const missing = effectiveEntries.filter(({ parentStockCode }) => !bomByParentStockCode.has(String(parentStockCode).trim().toUpperCase()));
     if (missing.length) { dataIssues.push(isThermoforming ? `Thermoforming parent BOM missing — ${missing[0].parentStockCode}` : effectiveEntries.length > 1 ? `${entry.partNumber} pair incomplete — ${missing.map((row) => `${row.parentStockCode} BOM missing`).join(", ")}` : `BOM missing in Syspro: ${missing[0].parentStockCode}`); return; }
 

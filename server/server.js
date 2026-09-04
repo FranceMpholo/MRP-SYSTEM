@@ -1,4 +1,6 @@
-require("dotenv").config();
+// Load connection settings before importing routes/db. db.js builds the ODBC
+// connection string when it is first required.
+require("dotenv").config({ quiet: true });
 const express = require("express");
 const cors = require("cors");
 const inventoryRoutes = require("./routes/inventory");

@@ -6,13 +6,16 @@ const INVENTORY_SQL = `
 SELECT
     im.StockCode,
     im.Description,
+    im.StockUom,
     SUM(CASE WHEN iw.Warehouse = 'B-WIP01' THEN ISNULL(iw.QtyOnHand, 0) ELSE 0 END) AS B_WIP01_SOH,
-    SUM(CASE WHEN iw.Warehouse = 'B-RAW01' THEN ISNULL(iw.QtyOnHand, 0) ELSE 0 END) AS B_RAW01_SOH
+    SUM(CASE WHEN iw.Warehouse = 'B-RAW01' THEN ISNULL(iw.QtyOnHand, 0) ELSE 0 END) AS B_RAW01_SOH,
+    SUM(CASE WHEN iw.Warehouse = 'B-CON01' THEN ISNULL(iw.QtyOnHand, 0) ELSE 0 END) AS B_CON01_SOH,
+    SUM(CASE WHEN iw.Warehouse = 'B-CHE01' THEN ISNULL(iw.QtyOnHand, 0) ELSE 0 END) AS B_CHE01_SOH
 FROM InvMaster im
 LEFT JOIN InvWarehouse iw
     ON iw.StockCode = im.StockCode
-    AND iw.Warehouse IN ('B-WIP01', 'B-RAW01')
-GROUP BY im.StockCode, im.Description
+    AND iw.Warehouse IN ('B-WIP01', 'B-RAW01', 'B-CON01', 'B-CHE01')
+GROUP BY im.StockCode, im.Description, im.StockUom
 ORDER BY im.StockCode;
 `;
 const BOM_SQL = `

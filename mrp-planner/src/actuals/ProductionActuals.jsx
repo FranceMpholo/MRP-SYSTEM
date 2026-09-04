@@ -4,12 +4,22 @@ import { SHIFTS, addCalendarDays, getISOWeek, mondayOf, planningAlias as blowPla
 import { deriveMaterialReconciliation } from "../reconciliation/deriveMaterialReconciliation";
 import "./productionActuals.css";
 import { PRODUCTION_LINES, classifyThermoformingParent, deriveThermoformingOutput, getThermoformingDisplayCode } from "../production/productionLines";
+import PlanAdjustmentDialog from "../planning/PlanAdjustmentDialog";
+import { adjustmentReasonLabel, getAdjustedPlanQty, getEffectivePlanQty, getOriginalPlanQty, getPlanAdjustmentQty, hasPlanAdjustment } from "../planning/planQuantities";
 
 const fmt = (value) => value === null || value === undefined ? "—" : (Math.round((Number(value) + Number.EPSILON) * 100) / 100).toLocaleString(undefined, { maximumFractionDigits: 2 });
 const dayName = (iso) => new Date(`${iso}T12:00:00`).toLocaleDateString(undefined, { weekday: "long", day: "2-digit", month: "short" });
 const nextDay = (day) => addCalendarDays(day, 1);
 const machineLabel = (machine) => machine.replace("BM0", "BM");
 const tones = { "Data incomplete": ["#F3E1DE", "#A6362B"], "Pending BKF": ["#FFF1C7", "#765400"], "Consumption variance": ["#F3E1DE", "#A6362B"], "Stock balance variance": ["#F1E3D3", "#8C4A15"], Tied: ["#E1EBE3", "#2F6F4E"] };
+
+function PlanDetailsDialog({ plan, actual, users, label, onClose }) {
+  const effective = getEffectivePlanQty(plan);
+  const actualQty = Number(actual?.actualMouldQty) || 0;
+  const adjustedBy = users.find((user) => user.id === plan.adjustedByUserId);
+  const rows = [["Original Plan", fmt(getOriginalPlanQty(plan))], ["Adjusted Plan", fmt(getAdjustedPlanQty(plan))], ["Effective Plan", fmt(effective)], ["Plan Adjustment", fmt(getPlanAdjustmentQty(plan))], ["Actual", fmt(actual?.actualMouldQty)], ["Production Variance", fmt(actualQty - effective)], ["Reason", adjustmentReasonLabel(plan.adjustmentReason)], ["Adjusted by", adjustedBy?.fullName || plan.adjustedByUserId || "—"], ["Adjusted at", plan.adjustedAt ? new Date(plan.adjustedAt).toLocaleString() : "—"], ["Comment", plan.adjustmentComment || "—"]];
+  return <div className="actual-details-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="actual-details-dialog" role="dialog" aria-modal="true" aria-labelledby="actual-details-title"><header><div><span>Production run details</span><h2 id="actual-details-title">{label}</h2><p>{machineLabel(plan.machine)} · {plan.day} · {plan.shift.replace("SHIFT 0", "Shift ")}</p></div><button type="button" onClick={onClose} aria-label="Close details">×</button></header><div className="actual-details-grid">{rows.map(([name, value]) => <div key={name} className={name === "Comment" ? "wide" : ""}><span>{name}</span><b className={name.includes("Plan") || name.includes("Actual") || name.includes("Variance") ? "plex-mono" : ""}>{value}</b></div>)}</div><footer><button type="button" className="mrp-btn mrp-btn-primary" onClick={onClose}>Close</button></footer></section></div>;
+}
 
 function ReconciliationSection({ actuals, planning, items, boms, sysproTransactions, openingWipBalances, closingWipBalances, tolerances, day }) {
   const [open, setOpen] = useState(false);
@@ -35,9 +45,11 @@ function ReconciliationSection({ actuals, planning, items, boms, sysproTransacti
   </section>;
 }
 
-export default function ProductionActuals({ actuals, setActuals, planning, onWeekChange, items, boms, sysproTransactions, openingWipBalances, closingWipBalances, tolerances, editable = true, currentUserId, productionLine = "blowMoulding", bomStatus }) {
+export default function ProductionActuals({ actuals, setActuals, planning, onWeekChange, items, boms, sysproTransactions, openingWipBalances, closingWipBalances, tolerances, editable = true, canAdjust = false, onAdjustPlan, users = [], currentUserId, productionLine = "blowMoulding", bomStatus }) {
   const [day, setDay] = useState(planning.weekStart);
   const [commentFor, setCommentFor] = useState(null);
+  const [adjusting, setAdjusting] = useState(null);
+  const [detailsFor, setDetailsFor] = useState(null);
   const line = PRODUCTION_LINES[productionLine]; const MACHINES = Object.keys(line.machines);
   const planningAlias = (code) => productionLine === "thermoforming" ? getThermoformingDisplayCode(code) : blowPlanningAlias(code);
   useEffect(() => { setDay(planning.weekStart); }, [planning.weekStart]);
@@ -60,15 +72,18 @@ export default function ProductionActuals({ actuals, setActuals, planning, onWee
     {!editable && <div className="actual-data-warning">Read-only production actuals access</div>}
     <header className="actual-header"><div><h1>{line.name} Production Actuals</h1><p>CW{week} · {year} · supervisors capture {line.quantityLabel.toLowerCase()} against the approved plan</p></div><div className="actual-week-nav"><button onClick={() => onWeekChange(addCalendarDays(planning.weekStart, -7))}><ChevronLeft size={15} /> Previous</button><button className="current" onClick={() => onWeekChange(mondayOf(new Date()))}><CalendarDays size={15} /> Current Week</button><button onClick={() => onWeekChange(addCalendarDays(planning.weekStart, 7))}>Next <ChevronRight size={15} /></button></div></header>
     <div className="actual-day-tabs">{days.map((date) => <button key={date} className={date === day ? "active" : ""} onClick={() => setDay(date)}><span>{dayName(date).split(",")[0]}</span><b>{date.slice(8)}</b></button>)}</div>
-    <div className="actual-board-scroll"><table className="actual-board"><thead><tr><th>Machine</th>{SHIFTS.map((shift) => <th key={shift}>{shift.replace("SHIFT 0", "Shift ")}</th>)}<th>Cum Plan</th><th>Cum Actual</th><th>Variance</th></tr></thead><tbody>{MACHINES.map((machine) => {
+    <div className="actual-board-scroll"><table className="actual-board"><thead><tr><th>Machine</th>{SHIFTS.map((shift) => <th key={shift}>{shift.replace("SHIFT 0", "Shift ")}</th>)}<th>Original Plan</th><th>Effective Plan</th><th>Actual</th><th>Production Variance</th></tr></thead><tbody>{MACHINES.map((machine) => {
       const machinePlans = SHIFTS.flatMap((shift) => plans.get(`${machine}|${shift}`) || []);
-      const cumPlan = machinePlans.reduce((sum, plan) => sum + (Number(plan.buildQty) || 0), 0);
+      const originalPlan = machinePlans.reduce((sum, plan) => sum + getOriginalPlanQty(plan), 0);
+      const effectivePlan = machinePlans.reduce((sum, plan) => sum + getEffectivePlanQty(plan), 0);
       const cumActual = machinePlans.reduce((sum, plan) => sum + (Number(actualsByPlan.get(plan.id)?.actualMouldQty) || 0), 0);
       return <tr key={machine}><th>{machineLabel(machine)}</th>{SHIFTS.map((shift) => {
         const slotPlans = plans.get(`${machine}|${shift}`) || []; if (!slotPlans.length) return <td key={shift}><div className="actual-cell empty">Unassigned</div></td>;
-        return <td key={shift}><div className="actual-slot-runs">{slotPlans.map((plan) => { const actual = actualsByPlan.get(plan.id), off = plan.status === "OFF", changeover = plan.status === "Changeover"; return <div key={plan.id} className={`actual-cell ${off ? "off" : changeover ? "changeover" : "production"}`}><div className="actual-plan-label">{off ? "OFF" : changeover ? `C/O → ${planningAlias(plan.partNumber)}` : planningAlias(plan.partNumber)}</div>{!off && <><div className="actual-plan-qty">Plan: {fmt(plan.buildQty)}</div><label>Actual<input type="number" min="0" value={actual?.actualMouldQty ?? ""} onChange={(e) => updateActual(plan, "actualMouldQty", e.target.value === "" ? "" : Math.max(0, Number(e.target.value)))} /></label><button className={`actual-comment ${actual?.comment ? "has-comment" : ""}`} onClick={() => setCommentFor(commentFor === plan.id ? null : plan.id)}><MessageSquare size={12} /> {actual?.comment ? "Note added" : "Add note"}</button>{commentFor === plan.id && <input className="actual-comment-input" value={actual?.comment || ""} onChange={(e) => updateActual(plan, "comment", e.target.value)} placeholder="Optional comment" autoFocus />}</>}</div>; })}</div></td>;
-      })}<td className="actual-total">{fmt(cumPlan)}</td><td className="actual-total">{fmt(cumActual)}</td><td className={`actual-total variance ${cumActual - cumPlan < 0 ? "negative" : cumActual - cumPlan > 0 ? "positive" : ""}`}>{fmt(cumActual - cumPlan)}</td></tr>;
+        return <td key={shift}><div className="actual-slot-runs">{slotPlans.map((plan) => { const actual = actualsByPlan.get(plan.id), off = plan.status === "OFF", changeover = plan.status === "Changeover", effective = getEffectivePlanQty(plan), variance = (Number(actual?.actualMouldQty) || 0) - effective; return <div key={plan.id} className={`actual-cell ${off ? "off" : changeover ? "changeover" : "production"}`}><div className="actual-plan-label">{off ? "OFF" : changeover ? `C/O → ${planningAlias(plan.partNumber)}` : planningAlias(plan.partNumber)}</div>{!off && <><div className="actual-plan-qty">Plan: {fmt(effective)} {hasPlanAdjustment(plan) && <b>ADJ</b>}</div><label>Actual<input type="number" min="0" value={actual?.actualMouldQty ?? ""} onChange={(e) => updateActual(plan, "actualMouldQty", e.target.value === "" ? "" : Math.max(0, Number(e.target.value)))} /></label><div className={`actual-plan-qty ${variance < 0 ? "negative" : variance > 0 ? "positive" : ""}`}>Variance: {fmt(variance)}</div><div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>{canAdjust && <button type="button" className="actual-comment" onClick={() => setAdjusting(plan)}>Adjust Plan</button>}<button type="button" className="actual-comment" onClick={() => setDetailsFor(plan.id)}>Details</button><button type="button" className={`actual-comment ${actual?.comment ? "has-comment" : ""}`} onClick={() => setCommentFor(commentFor === plan.id ? null : plan.id)}><MessageSquare size={12} /> {actual?.comment ? "Note added" : "Add note"}</button></div>{commentFor === plan.id && <input className="actual-comment-input" value={actual?.comment || ""} onChange={(e) => updateActual(plan, "comment", e.target.value)} placeholder="Optional comment" autoFocus />}</>}</div>; })}</div></td>;
+      })}<td className="actual-total">{fmt(originalPlan)}</td><td className="actual-total">{fmt(effectivePlan)}</td><td className="actual-total">{fmt(cumActual)}</td><td className={`actual-total variance ${cumActual - effectivePlan < 0 ? "negative" : cumActual - effectivePlan > 0 ? "positive" : ""}`}>{fmt(cumActual - effectivePlan)}</td></tr>;
     })}</tbody></table></div>
     <ReconciliationSection actuals={actuals} planning={planning} items={items} boms={boms} sysproTransactions={sysproTransactions} openingWipBalances={openingWipBalances} closingWipBalances={closingWipBalances} tolerances={tolerances} day={day} />
+    {adjusting && <PlanAdjustmentDialog entry={adjusting} onClose={() => setAdjusting(null)} onSave={(adjustment) => { onAdjustPlan(adjusting.id, adjustment); setAdjusting(null); }} />}
+    {detailsFor && (() => { const plan = (planning.entries || []).find((entry) => entry.id === detailsFor); return plan ? <PlanDetailsDialog plan={plan} actual={actualsByPlan.get(plan.id)} users={users} label={plan.status === "Changeover" ? `C/O → ${planningAlias(plan.partNumber)}` : planningAlias(plan.partNumber)} onClose={() => setDetailsFor(null)} /> : null; })()}
   </div>;
 }

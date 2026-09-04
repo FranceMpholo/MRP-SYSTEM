@@ -1,3 +1,5 @@
+import { getEffectivePlanQty } from "./planQuantities.js";
+
 export const MACHINES = ["BM01", "BM02", "BM03", "BM04", "BM05"];
 export const SHIFTS = ["SHIFT 01", "SHIFT 02", "SHIFT 03"];
 
@@ -85,8 +87,9 @@ export function getISOWeek(iso) {
 
 export function summarize(entries = []) {
   const totals = new Map();
-  entries.forEach(({ partNumber, buildQty }) => {
-    const qty = Number(buildQty) || 0;
+  entries.forEach((entry) => {
+    const { partNumber } = entry;
+    const qty = getEffectivePlanQty(entry);
     if (partNumber && qty > 0) totals.set(partNumber, (totals.get(partNumber) || 0) + qty);
   });
   return [...totals].map(([partNumber, buildQty]) => ({ partNumber, buildQty, alias: getPlanningDisplayCode(partNumber) || PART_ALIASES[partNumber] || partNumber }));
