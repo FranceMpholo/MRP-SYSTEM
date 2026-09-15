@@ -5,3 +5,5 @@ node_modules/
 mrp-planner/node_modules/
 mrp-planner/dist/
 *.log
+
+*.backup
