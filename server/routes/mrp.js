@@ -342,7 +342,7 @@ router.post("/planning", async (request, response) => {
 
     // Foreign-key validation
     const departmentRows = await postgres.query(
-      `SELECT id
+      `SELECT id, is_active
        FROM departments
        WHERE id = $1`,
       [department_id]
@@ -350,10 +350,12 @@ router.post("/planning", async (request, response) => {
 
     if (departmentRows.length === 0) {
       errors.push("department_id does not exist");
+    } else if (!departmentRows[0].is_active) {
+      errors.push("department_id is inactive");
     }
 
     const shiftRows = await postgres.query(
-      `SELECT id, department_id
+      `SELECT id, department_id, is_active
        FROM shifts
        WHERE id = $1`,
       [shift_id]
@@ -361,14 +363,17 @@ router.post("/planning", async (request, response) => {
 
     if (shiftRows.length === 0) {
       errors.push("shift_id does not exist");
-    } else if (
-      String(shiftRows[0].department_id) !== String(department_id)
-    ) {
-      errors.push("shift_id does not belong to department_id");
+    } else {
+      if (!shiftRows[0].is_active) {
+        errors.push("shift_id is inactive");
+      }
+      if (String(shiftRows[0].department_id) !== String(department_id)) {
+        errors.push("shift_id does not belong to department_id");
+      }
     }
 
     const itemRows = await postgres.query(
-      `SELECT id
+      `SELECT id, is_active
        FROM items
        WHERE id = $1`,
       [parent_item_id]
@@ -376,11 +381,13 @@ router.post("/planning", async (request, response) => {
 
     if (itemRows.length === 0) {
       errors.push("parent_item_id does not exist");
+    } else if (!itemRows[0].is_active) {
+      errors.push("parent_item_id is inactive");
     }
 
     if (machine_id) {
       const machineRows = await postgres.query(
-        `SELECT id, department_id
+        `SELECT id, department_id, is_active
          FROM machines
          WHERE id = $1`,
         [machine_id]
@@ -388,10 +395,13 @@ router.post("/planning", async (request, response) => {
 
       if (machineRows.length === 0) {
         errors.push("machine_id does not exist");
-      } else if (
-        String(machineRows[0].department_id) !== String(department_id)
-      ) {
-        errors.push("machine_id does not belong to department_id");
+      } else {
+        if (!machineRows[0].is_active) {
+          errors.push("machine_id is inactive");
+        }
+        if (String(machineRows[0].department_id) !== String(department_id)) {
+          errors.push("machine_id does not belong to department_id");
+        }
       }
     }
 
@@ -628,7 +638,7 @@ router.patch("/planning/:id", async (request, response) => {
 
     const departmentRows = await postgres.query(
       `
-      SELECT id
+      SELECT id, is_active
       FROM departments
       WHERE id = $1
       `,
@@ -637,11 +647,13 @@ router.patch("/planning/:id", async (request, response) => {
 
     if (departmentRows.length === 0) {
       errors.push("department_id does not exist");
+    } else if (!departmentRows[0].is_active) {
+      errors.push("department_id is inactive");
     }
 
     const shiftRows = await postgres.query(
       `
-      SELECT id, department_id
+      SELECT id, department_id, is_active
       FROM shifts
       WHERE id = $1
       `,
@@ -650,15 +662,18 @@ router.patch("/planning/:id", async (request, response) => {
 
     if (shiftRows.length === 0) {
       errors.push("shift_id does not exist");
-    } else if (
-      String(shiftRows[0].department_id) !== String(newDepartmentId)
-    ) {
-      errors.push("shift_id does not belong to department_id");
+    } else {
+      if (!shiftRows[0].is_active) {
+        errors.push("shift_id is inactive");
+      }
+      if (String(shiftRows[0].department_id) !== String(newDepartmentId)) {
+        errors.push("shift_id does not belong to department_id");
+      }
     }
 
     const itemRows = await postgres.query(
       `
-      SELECT id
+      SELECT id, is_active
       FROM items
       WHERE id = $1
       `,
@@ -667,12 +682,14 @@ router.patch("/planning/:id", async (request, response) => {
 
     if (itemRows.length === 0) {
       errors.push("parent_item_id does not exist");
+    } else if (!itemRows[0].is_active) {
+      errors.push("parent_item_id is inactive");
     }
 
     if (newMachineId) {
       const machineRows = await postgres.query(
         `
-        SELECT id, department_id
+        SELECT id, department_id, is_active
         FROM machines
         WHERE id = $1
         `,
@@ -681,10 +698,13 @@ router.patch("/planning/:id", async (request, response) => {
 
       if (machineRows.length === 0) {
         errors.push("machine_id does not exist");
-      } else if (
-        String(machineRows[0].department_id) !== String(newDepartmentId)
-      ) {
-        errors.push("machine_id does not belong to department_id");
+      } else {
+        if (!machineRows[0].is_active) {
+          errors.push("machine_id is inactive");
+        }
+        if (String(machineRows[0].department_id) !== String(newDepartmentId)) {
+          errors.push("machine_id does not belong to department_id");
+        }
       }
     }
 
@@ -856,6 +876,9 @@ router.get("/planning/:id", async (request, response) => {
   }
 });
 router.delete("/planning/:id", async (request, response) => {
+  let client;
+  let transactionStarted = false;
+
   try {
     const { id } = request.params;
 
@@ -869,7 +892,11 @@ router.delete("/planning/:id", async (request, response) => {
       });
     }
 
-    const existingRows = await postgres.query(
+    client = await postgres.pool.connect();
+    await client.query("BEGIN");
+    transactionStarted = true;
+
+    const existingResult = await client.query(
       `
       SELECT
         id,
@@ -878,18 +905,73 @@ router.delete("/planning/:id", async (request, response) => {
         status
       FROM planning_entries
       WHERE id = $1
+      FOR UPDATE
       `,
       [id]
     );
 
-    if (existingRows.length === 0) {
+    if (existingResult.rows.length === 0) {
+      await client.query("ROLLBACK");
+      transactionStarted = false;
+
       return response.status(404).json({
         success: false,
         error: "Planning entry not found",
       });
     }
 
-    const deletedRows = await postgres.query(
+    const existing = existingResult.rows[0];
+
+    if (existing.status !== "Planned") {
+      await client.query("ROLLBACK");
+      transactionStarted = false;
+
+      return response.status(409).json({
+        success: false,
+        error: "Only untouched Planned entries may be permanently deleted",
+      });
+    }
+
+    const dependencyResult = await client.query(
+      `
+      SELECT EXISTS (
+        SELECT 1
+        FROM production_actuals
+        WHERE planning_entry_id = $1
+
+        UNION ALL
+
+        SELECT 1
+        FROM material_requirements
+        WHERE planning_entry_id = $1
+
+        UNION ALL
+
+        SELECT 1
+        FROM material_reconciliations
+        WHERE planning_entry_id = $1
+
+        UNION ALL
+
+        SELECT 1
+        FROM oee_runs
+        WHERE planning_entry_id = $1
+      ) AS has_dependencies
+      `,
+      [id]
+    );
+
+    if (dependencyResult.rows[0].has_dependencies) {
+      await client.query("ROLLBACK");
+      transactionStarted = false;
+
+      return response.status(409).json({
+        success: false,
+        error: "Planning entry has operational history and cannot be permanently deleted",
+      });
+    }
+
+    const deletedResult = await client.query(
       `
       DELETE FROM planning_entries
       WHERE id = $1
@@ -902,18 +984,38 @@ router.delete("/planning/:id", async (request, response) => {
       [id]
     );
 
+    await client.query("COMMIT");
+    transactionStarted = false;
+
     response.json({
       success: true,
       message: "Planning entry deleted",
-      data: deletedRows[0],
+      data: deletedResult.rows[0],
     });
   } catch (error) {
+    if (transactionStarted && client) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackError) {
+        console.error("Failed to roll back planning entry deletion:", rollbackError);
+      }
+    }
+
+    if (error.code === "23503") {
+      return response.status(409).json({
+        success: false,
+        error: "Planning entry has operational history and cannot be permanently deleted",
+      });
+    }
+
     console.error("Failed to delete planning entry:", error);
 
     response.status(500).json({
       success: false,
       error: "Failed to delete planning entry",
     });
+  } finally {
+    if (client) client.release();
   }
 });
 module.exports = router;
