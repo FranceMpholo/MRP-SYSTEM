@@ -1,7 +1,8 @@
 import { getEffectivePlanQty } from "./planQuantities.js";
+import { SHIFT_CONFIG } from './shiftConfig.js';
 
 export const MACHINES = ["BM01", "BM02", "BM03", "BM04", "BM05"];
-export const SHIFTS = ["SHIFT 01", "SHIFT 02", "SHIFT 03"];
+export const SHIFTS = Object.keys(SHIFT_CONFIG);
 
 // Deliberately explicit: production aliases are business labels, not parsed stock-code suffixes.
 export const PART_ALIASES = {
