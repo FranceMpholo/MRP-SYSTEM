@@ -11,6 +11,7 @@ const PLANNING_STATUSES = [
   "Changeover",
   "OFF",
 ];
+const MAX_ITEM_LOOKUP_CODES = 50;
 
 function isValidPlanningStatus(status) {
   return PLANNING_STATUSES.includes(status);
@@ -160,6 +161,78 @@ router.get("/machines", async (_request, response) => {
     response.status(500).json({
       success: false,
       error: "Failed to load machines",
+    });
+  }
+});
+router.get("/items", async (request, response) => {
+  const input = request.query?.stock_code;
+  const requestedValues = Array.isArray(input) ? input : input === undefined ? [] : [input];
+
+  if (
+    requestedValues.length === 0 ||
+    requestedValues.some((value) => typeof value !== "string")
+  ) {
+    return response.status(400).json({
+      success: false,
+      error: "Provide at least one valid stock_code query parameter",
+    });
+  }
+
+  if (requestedValues.length > MAX_ITEM_LOOKUP_CODES) {
+    return response.status(400).json({
+      success: false,
+      error: `A maximum of ${MAX_ITEM_LOOKUP_CODES} stock codes may be requested`,
+    });
+  }
+
+  const trimmedCodes = requestedValues.map((value) => value.trim());
+  if (trimmedCodes.some((stockCode) => stockCode === "")) {
+    return response.status(400).json({
+      success: false,
+      error: "stock_code values must not be blank",
+    });
+  }
+
+  if (trimmedCodes.some((stockCode) => /_PAIR$/i.test(stockCode))) {
+    return response.status(400).json({
+      success: false,
+      error: "Synthetic pair codes are not inventory item stock codes",
+    });
+  }
+
+  const requestedCodes = [...new Set(trimmedCodes)];
+
+  try {
+    const rows = await postgres.query(
+      `SELECT
+         id,
+         stock_code,
+         description,
+         uom,
+         item_type,
+         source_system,
+         is_active,
+         syspro_last_synced_at
+       FROM items
+       WHERE stock_code = ANY($1::text[])
+       ORDER BY array_position($1::text[], stock_code)`,
+      [requestedCodes]
+    );
+    const resolvedCodes = new Set(rows.map((row) => row.stock_code));
+
+    return response.json({
+      success: true,
+      data: {
+        requested_codes: requestedCodes,
+        items: rows,
+        unresolved_codes: requestedCodes.filter((stockCode) => !resolvedCodes.has(stockCode)),
+      },
+    });
+  } catch (error) {
+    console.error("Failed to resolve PostgreSQL items:", error);
+    return response.status(500).json({
+      success: false,
+      error: "Failed to resolve items",
     });
   }
 });
