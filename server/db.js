@@ -26,10 +26,11 @@ async function getPool() {
 }
 
 async function query(queryText, parameters = []) {
-  if (parameters.length) throw new Error("Parameterized queries are not implemented for the SYSPRO adapter.");
   const pool = await getPool();
   try {
-    const result = await pool.request().query(queryText);
+    const request = pool.request();
+    for (const parameter of parameters) request.input(parameter.name, parameter.type, parameter.value);
+    const result = await request.query(queryText);
     return result.recordset || [];
   }
   catch (error) { poolPromise = undefined; throw error; }
