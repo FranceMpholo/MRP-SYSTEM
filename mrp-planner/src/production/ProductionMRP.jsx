@@ -1,6 +1,8 @@
-import React, { useMemo } from "react";
-import { Boxes, ClipboardList, PackageCheck } from "lucide-react";
+import React, { useMemo, useState } from "react";
+import { Boxes, ClipboardList, Download, PackageCheck } from "lucide-react";
 import { deriveProductionMRP } from "./deriveProductionMRP";
+import { PRODUCTION_LINES } from "./productionLines";
+import atdLogo from "../assets/atd-logo.png";
 
 const colors = {
   ink: "#1B2430", card: "#FFFFFF", line: "#E3DFD2", muted: "#746C5C",
@@ -13,11 +15,12 @@ const fmt = (value) => {
   return rounded.toLocaleString(undefined, { maximumFractionDigits: 2 });
 };
 
-function Section({ title, subtitle, icon: Icon, children }) {
+function Section({ title, subtitle, icon: Icon, action, children }) {
   return <section style={{ background: colors.card, border: `1px solid ${colors.line}`, borderRadius: 6, overflow: "hidden" }}>
     <div style={{ padding: "13px 15px", borderBottom: `1px solid ${colors.line}`, display: "flex", alignItems: "center", gap: 9 }}>
       <Icon size={17} color={colors.copper} />
       <div><div style={{ color: colors.ink, fontSize: 16, fontWeight: 600 }}>{title}</div><div style={{ color: colors.muted, fontSize: 12, marginTop: 2 }}>{subtitle}</div></div>
+      {action && <div style={{ marginLeft: "auto" }}>{action}</div>}
     </div>
     {children}
   </section>;
@@ -35,10 +38,16 @@ function Status({ child }) {
   </div>;
 }
 
-export default function ProductionMRP({ planning, items, boms, productionMrp, bomStatus }) {
+export default function ProductionMRP({ planning, items, boms, productionMrp, bomStatus, productionLine = "blowMoulding" }) {
+  const [exporting, setExporting] = useState(false);
   const productionMRP = useMemo(() => productionMrp || deriveProductionMRP({ planning, items, boms }), [productionMrp, planning, items, boms]);
   const { productionPlan, childRequirements, storeRequests } = productionMRP;
   const planningWeek = planning?.weekStart || "—";
+  async function downloadStoreRequest() {
+    setExporting(true);
+    try { const { exportStoreRequestPdf } = await import("./exportStoreRequestPdf"); await exportStoreRequestPdf({ storeRequests, planningWeek, productionLineName: PRODUCTION_LINES[productionLine]?.name || "Blow Moulding", logoUrl: atdLogo }); }
+    finally { setExporting(false); }
+  }
 
   return <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
     <div>
@@ -62,7 +71,7 @@ export default function ProductionMRP({ planning, items, boms, productionMrp, bo
       </table></div>
     </Section>
 
-    <Section title="Store request — B-RAW01" subtitle="Requests are rounded to pack size; B-RAW01 tests whether Stores can fulfil the request." icon={PackageCheck}>
+    <Section title="Store request — B-RAW01" subtitle="Requests are rounded to pack size; B-RAW01 tests whether Stores can fulfil the request." icon={PackageCheck} action={<button className="mrp-btn mrp-btn-primary" disabled={exporting} onClick={downloadStoreRequest}><Download size={15} /> {exporting ? "Generating…" : "Download PDF"}</button>}>
       <div style={{ overflowX: "auto" }}><table className="mrp-table" style={{ minWidth: 1080 }}>
         <thead><tr><th>Child stock code</th><th>Description</th><th>UOM</th><th style={{ textAlign: "right" }}>Production shortfall</th><th style={{ textAlign: "right" }}>Pack size</th><th style={{ textAlign: "right" }}>Packs required</th><th style={{ textAlign: "right" }}>Store request qty</th><th style={{ textAlign: "right" }}>B-RAW01 SOH</th><th style={{ textAlign: "right" }}>Projected RAW balance</th><th>Status</th></tr></thead>
         <tbody>{storeRequests.map((child) => <tr key={child.childId}><td className="plex-mono" style={{ fontWeight: 600 }}>{child.stockCode}</td><td>{child.description}</td><td className="plex-mono">{child.uom || "—"}</td><td className="plex-mono" style={{ textAlign: "right" }}>{fmt(child.productionShortfall)}</td><td className="plex-mono" style={{ textAlign: "right" }}>{fmt(child.packSize)}</td><td className="plex-mono" style={{ textAlign: "right" }}>{fmt(child.packsRequired)}</td><td className="plex-mono" style={{ textAlign: "right", fontWeight: 600 }}>{fmt(child.storeRequestQty)}</td><td className="plex-mono" style={{ textAlign: "right" }}>{fmt(child.bRaw01Soh)}</td><td className="plex-mono" style={{ textAlign: "right", color: child.projectedRawBalance < 0 ? colors.brick : colors.ink }}>{fmt(child.projectedRawBalance)}</td><td><Status child={child} /></td></tr>)}{!storeRequests.length && <Empty columns={10}>No Store requests are required from B-RAW01 for this Production Plan.</Empty>}</tbody>
