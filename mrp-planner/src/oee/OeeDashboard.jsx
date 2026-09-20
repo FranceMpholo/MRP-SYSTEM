@@ -1,0 +1,62 @@
+import React, { useEffect, useMemo, useState } from 'react';
+import { PRODUCTION_LINES } from '../production/productionLines';
+import { SHIFTS, addCalendarDays } from '../planning/planningBoardUtils';
+import { SHIFT_CONFIG } from '../planning/shiftConfig';
+import { deriveFinishedGoods } from './finishedGoods';
+import OeeChart, { formatNumber as fmt, metricLabels, percent } from './OeeChart';
+import { deriveDashboardRows, deriveDowntimeByCategory, deriveOeeMtd, filterDashboardRows, groupOeeRows, summarizeOeeRows } from './dashboardReporting';
+import './oee.css';
+
+const factors = ['externalOee', 'internalOee', 'availability', 'quality', 'performance', 'productivity'];
+const issueLabels = { MISSING_NICT: 'Missing NICT', MISSING_ACTUAL: 'Missing Actual', MISSING_PLANNED_TIME: 'Missing Planned Time', INVALID_TIME_ALLOCATION: 'Invalid Time Allocation', SCRAP_EXCEEDS_TOTAL: 'Scrap exceeds Actual', UNVERIFIED_SPECIAL_RULE: 'Special process rule not verified', MISSING_QUALITY_INPUT: 'Missing quality input' };
+const formatMetric = (value) => value === null || value === undefined ? '—' : percent(value);
+
+export default function OeeDashboard({ planningWeeks, actuals, settings, productionLine, setProductionLine, weekStart }) {
+  const [filters, setFilters] = useState({ startDate: weekStart, endDate: addCalendarDays(weekStart, 6), machine: '', shift: '', process: '', product: '', suffix: '', status: '' });
+  const [fgPayload, setFgPayload] = useState(null);
+  const [fgError, setFgError] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [refresh, setRefresh] = useState(0);
+  const [page, setPage] = useState(0);
+  const validRange = filters.startDate !== '' && filters.endDate !== '' && filters.startDate <= filters.endDate && (Date.parse(filters.endDate) - Date.parse(filters.startDate)) / 86400000 <= 366;
+  const rangeKey = `${filters.startDate}/${filters.endDate}`;
+
+  useEffect(() => {
+    setFgPayload(null); setFgError('');
+    if (!validRange) { setLoading(false); return undefined; }
+    const controller = new AbortController(); setLoading(true);
+    fetch(`/api/syspro/oee/finished-goods?${new URLSearchParams({ startDate: filters.startDate, endDate: filters.endDate })}`, { signal: controller.signal, headers: { Accept: 'application/json' } })
+      .then(async (response) => { if (!response.headers.get('content-type')?.includes('application/json')) throw new Error(`HTTP ${response.status}: expected JSON`); const payload = await response.json(); if (!response.ok || payload.success !== true || !Array.isArray(payload.data)) throw new Error(payload.error ?? 'Invalid response'); if (!controller.signal.aborted) setFgPayload({ ...payload, rangeKey }); })
+      .catch((error) => { if (!controller.signal.aborted) { console.error('OEE B-FIN01 request failed:', error); setFgError('B-FIN01 movement data is unavailable.'); } })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [rangeKey, validRange, refresh]);
+  useEffect(() => { setFilters((current) => ({ ...current, machine: '', product: '', suffix: '' })); }, [productionLine]);
+  useEffect(() => setPage(0), [filters, productionLine, actuals, settings]);
+
+  const allRows = useMemo(() => deriveDashboardRows(planningWeeks, actuals, settings, productionLine), [planningWeeks, actuals, settings, productionLine]);
+  const selected = useMemo(() => validRange ? filterDashboardRows(allRows, { ...filters, productionLine }) : [], [allRows, filters, productionLine, validRange]);
+  const summary = useMemo(() => summarizeOeeRows(selected), [selected]);
+  const mtd = useMemo(() => deriveOeeMtd(allRows, filters.endDate, { ...filters, productionLine }), [allRows, filters, productionLine]);
+  const daily = useMemo(() => groupOeeRows(selected, 'date'), [selected]);
+  const machines = useMemo(() => groupOeeRows(selected, 'machine'), [selected]);
+  const downtimeCategories = useMemo(() => deriveDowntimeByCategory(selected), [selected]);
+  const downtimeDaily = useMemo(() => groupOeeRows(selected, 'date').map((row) => ({ ...row, downtime: row.downtime ?? 0 })), [selected]);
+  const fg = useMemo(() => deriveFinishedGoods(validRange && fgPayload?.rangeKey === rangeKey ? fgPayload : null, selected, filters, productionLine), [fgPayload, rangeKey, selected, filters, productionLine, validRange]);
+  const line = PRODUCTION_LINES[productionLine];
+  const pages = Math.max(1, Math.ceil(selected.length / 30));
+  const currentPage = Math.min(page, pages - 1);
+  const change = (key, value) => setFilters((current) => ({ ...current, [key]: value }));
+
+  return <div className="oee-dashboard"><header className="oee-header"><div><h2>OEE</h2><p>{line.name} · Excel-style production effectiveness</p></div><div><span>{loading ? 'Loading B-FIN01…' : fgError ? 'B-FIN01 unavailable' : fgPayload ? 'SYSPRO connected · Read only' : 'Select reporting dates'}</span><button className="mrp-btn mrp-btn-ghost" disabled={loading || !validRange} onClick={() => setRefresh((value) => value + 1)}>Refresh FG</button></div></header>
+    <section className="oee-filters" aria-label="OEE reporting filters"><label>From Date<input type="date" value={filters.startDate} onChange={(event) => change('startDate', event.target.value)} /></label><label>To Date<input type="date" value={filters.endDate} onChange={(event) => change('endDate', event.target.value)} /></label><label>Production Line<select value={productionLine} onChange={(event) => setProductionLine(event.target.value)}>{Object.values(PRODUCTION_LINES).map((value) => <option key={value.id} value={value.id}>{value.name}</option>)}</select></label><label>Machine<select value={filters.machine} onChange={(event) => change('machine', event.target.value)}><option value="">All machines</option>{Object.keys(line.machines).map((machine) => <option key={machine}>{machine}</option>)}</select></label><label>Shift<select value={filters.shift} onChange={(event) => change('shift', event.target.value)}><option value="">All shifts</option>{SHIFTS.map((shift) => <option key={shift} value={shift}>{SHIFT_CONFIG[shift].name}</option>)}</select></label><label>Process<input value={filters.process} onChange={(event) => change('process', event.target.value)} placeholder="Process" /></label><label>Product / Stock Code<input type="search" value={filters.product} onChange={(event) => change('product', event.target.value)} /></label><label>Suffix<input value={filters.suffix} onChange={(event) => change('suffix', event.target.value)} /></label><label>Status<select value={filters.status} onChange={(event) => change('status', event.target.value)}><option value="">All statuses</option><option value="COMPLETE">Complete</option><option value="INCOMPLETE">Incomplete</option><option value="PENDING">Pending</option></select></label></section>
+    {!validRange && <p className="oee-notice" role="alert">Choose a valid reporting period of no more than 367 days.</p>}
+    <p className="oee-caption">{summary.completeCount} complete / {summary.incompleteCount} incomplete / {summary.pendingCount} pending runs. KPI percentages are arithmetic averages of complete row-level Excel-style results; quantities are summed. MTD runs from the first calendar day of the selected month through the reporting date.</p>
+    <div className="oee-kpis">{factors.map((key) => <article key={key}><h3>{metricLabels[key]}</h3><strong>{formatMetric(summary[key])}</strong><small>Complete rows only</small></article>)}</div>
+    <section className="oee-panel"><h3>Operational context</h3><div className="oee-kpi-grid">{[['Complete OEE Runs', summary.completeCount], ['Incomplete Runs', summary.incompleteCount], ['Pending OEE Runs', summary.pendingCount], ['Effective Plan', summary.effectivePlan], ['Revised Plan', summary.revisedPlan], ['Target', summary.target], ['Actual Produced', summary.actual], ['Good Parts', summary.good], ['Scrap Parts', summary.scrap], ['Planned Time', summary.plannedTime], ['Run Time', summary.runTime], ['Total Downtime', summary.downtime], ['MTD External OEE', formatMetric(mtd.externalOee)], ['Ideal OEE', formatMetric(settings?.general?.idealOee ?? 0.75)]].map(([label, value]) => <div key={label}><span className="oee-caption">{label}</span><strong>{typeof value === 'string' ? value : fmt(value)}</strong></div>)}</div></section>
+    <details className="oee-panel"><summary>Excel-style calculation scope</summary><p>Plan, Effective Plan, Revised Plan, Target, Actual, Good Parts, Scrap Parts, Planned Time, Planned Breaks, Total Downtime and Run Time are summed. Availability, Performance, Productivity, Quality, Internal OEE and External OEE are averaged from complete row-level results. Explicit zero values remain included; incomplete and pending values are excluded.</p><p>Effective Plan is the application adjustment quantity. Revised Plan is the NICT-based available-time capacity. Target is Run Time divided by cycle time. MTD is a true calendar-month-to-report-date calculation.</p></details>
+    <div className="oee-charts"><OeeChart title="OEE Trend" data={daily} series={['externalOee', 'internalOee']} line /><OeeChart title="OEE by Machine" data={machines} series={['externalOee', 'internalOee']} /><OeeChart title="OEE Factor Breakdown" data={machines} series={['availability', 'performance', 'quality', 'productivity']} /><OeeChart title="Production Quantity Comparison" data={machines} series={['effectivePlan', 'revisedPlan', 'target', 'actual']} percentage={false} /><OeeChart title="Downtime Trend" data={downtimeDaily} series={['downtime']} percentage={false} /><OeeChart title="Top Downtime Categories" data={downtimeCategories} series={['downtime']} percentage={false} /><OeeChart title="Quality / Scrap Trend" data={daily} series={['good', 'scrap', 'quality']} percentage={false} /></div>
+    <section className="oee-panel"><h3>Finished Goods Transferred · B-FIN01</h3><p className="oee-caption">Supporting evidence only. B-FIN01 movements do not supply Actual Produced, Good Parts, Scrap, Target, Performance, Quality or OEE.</p>{fgError && <p className="oee-notice">{fgError}</p>}{fg.available && <div className="oee-table-scroll"><table className="mrp-table"><thead><tr><th>Stock Code</th><th>Unit</th><th>Into FG</th><th>FG to WIP</th></tr></thead><tbody>{fg.products.map((row) => <tr key={row.stockCode}><td>{row.stockCode}</td><td>{row.uom}</td><td>{fmt(row.incoming)}</td><td>{fmt(row.returned)}</td></tr>)}{!fg.products.length && <tr><td colSpan="4">No matching movements in this period.</td></tr>}</tbody></table></div>}</section>
+    <section className="oee-panel"><div className="oee-header"><h3>OEE Detail · {line.quantityLabel}</h3><div><button disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}>Previous</button> {currentPage + 1} / {pages} <button disabled={currentPage + 1 >= pages} onClick={() => setPage(currentPage + 1)}>Next</button></div></div><div className="oee-table-scroll"><table className="mrp-table"><thead><tr>{['Date', 'Shift', 'Line', 'Machine', 'Process', 'Product', 'Suffix', 'Plan', 'Effective Plan', 'Revised Plan', 'Target', 'Actual', 'Good', 'Scrap', 'Planned Time', 'Planned Breaks', 'Downtime', 'Run Time', 'Availability', 'Performance', 'Productivity', 'Quality', 'Internal OEE', 'External OEE', 'Status'].map((label) => <th key={label}>{label}</th>)}</tr></thead><tbody>{selected.slice(currentPage * 30, (currentPage + 1) * 30).map((row) => <tr key={row.planningEntryId}><td>{row.date}</td><td>{row.shift}</td><td>{row.productionLine}</td><td>{row.machine}</td><td>{row.process}</td><td>{row.product}</td><td>{row.suffix || '—'}</td>{['plan', 'effectivePlan', 'revisedPlan', 'target', 'actual', 'good', 'scrap', 'plannedTime', 'plannedBreaks', 'downtime', 'runTime'].map((key) => <td key={key}>{fmt(row[key])}</td>)}{['availability', 'performance', 'productivity', 'quality', 'internalOee', 'externalOee'].map((key) => <td key={key}>{row.status === 'COMPLETE' ? percent(row[key]) : '—'}</td>)}<td><details><summary>{row.status}</summary>{row.issues?.map((issue) => <p key={issue}>{issueLabels[issue] ?? issue}</p>)}<p>planningEntryId: {row.planningEntryId}</p></details></td></tr>)}{!selected.length && <tr><td colSpan="25">No planned runs match these filters.</td></tr>}</tbody></table></div></section>
+  </div>;
+}
