@@ -7,3 +7,5 @@ mrp-planner/dist/
 *.log
 
 *.backup
+diagnostics/
+mrp-planner/refrence/
