@@ -9,3 +9,9 @@ mrp-planner/dist/
 *.backup
 diagnostics/
 mrp-planner/refrence/
+docs/production-scrap-investigation.md
+scripts/analyze-oee-reference.py
+scripts/analyze-production-scrap.cjs
+scripts/inspect-oee-workbook.py
+scripts/investigate-production-scrap.cjs
+scripts/validate-scrap-update.cjs
