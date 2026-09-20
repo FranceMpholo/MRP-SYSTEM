@@ -20,6 +20,11 @@ import { PRODUCTION_LINES, entryProductionLine } from "./production/productionLi
 import SysproBomExplorer from "./bom/SysproBomExplorer";
 import { applyPlanAdjustment } from "./planning/planQuantities";
 import CycleCount from "./cycleCount/CycleCount";
+import ProductionScrap from "./scrap/ProductionScrap";
+import OeeModuleShell from "./oee/OeeModuleShell";
+import { defaultOeeSettings } from "./planning/shiftConfig";
+import { buildOeeSettingsFoundation } from "./oee/oeeSettings";
+import { DEFAULT_PLANNING_HORIZON, PLANNING_HORIZONS, normalizePlanningHorizon, horizonOrders } from "./planning/planningHorizon";
 
 /* --------------------------------------------------------------------- */
 /*  Local storage shim — replaces Claude.ai's window.storage sandbox API */
@@ -363,12 +368,15 @@ export default function MRPPlanner() {
 
 function MRPPlannerCore({ currentUser, users, onSaveUsers, onLogout, onChangePassword }) {
   const [tab, setTab] = useState("dashboard");
+  const [oeeInputEntryId, setOeeInputEntryId] = useState(null);
   const [items, setItems] = useState([]);
   const [boms, setBoms] = useState([]);
   const [bomStatus, setBomStatus] = useState({ connected: false, loading: false, lastUpdated: null, error: null });
   const [demands, setDemands] = useState([]);
   const [openOrders, setOpenOrders] = useState([]);
   const [productionActuals, setProductionActuals] = useState([]);
+  const [oeeHistory, setOeeHistory] = useState([]);
+  const [oeeSettings, setOeeSettings] = useState(defaultOeeSettings);
   const [sysproTransactions, setSysproTransactions] = useState([]);
   const [openingWipBalances, setOpeningWipBalances] = useState([]);
   const [closingWipBalances, setClosingWipBalances] = useState([]);
@@ -381,7 +389,7 @@ function MRPPlannerCore({ currentUser, users, onSaveUsers, onLogout, onChangePas
   const [activeWeekStart, setActiveWeekStart] = useState(initialWeek);
   const [planningWeeks, setPlanningWeeks] = useState({ [initialWeek]: { weekStart: initialWeek, entries: [] } });
   const [selectedProductionLine, setSelectedProductionLine] = useState("blowMoulding");
-  const [horizon, setHorizon] = useState(10);
+  const [horizon, setHorizon] = useState(DEFAULT_PLANNING_HORIZON);
   const [loaded, setLoaded] = useState(false);
   const [saveState, setSaveState] = useState("idle"); // idle | saving | saved
   const [ledgerItemId, setLedgerItemId] = useState(null);
@@ -410,12 +418,14 @@ function MRPPlannerCore({ currentUser, users, onSaveUsers, onLogout, onChangePas
           const migratedActuals = (parsed.productionActuals || []).map((actual) => {
             if (actual.planningEntryId) return actual;
             const linkedPlan = planningEntries.find((entry) => entry.machine === actual.machine && entry.day === actual.day && entry.shift === actual.shift && (!actual.partNumber || entry.partNumber === actual.partNumber));
-            return linkedPlan ? { id: actual.id, planningEntryId: linkedPlan.id, actualMouldQty: actual.actualMouldQty, comment: actual.comment || "", updatedAt: actual.updatedAt || new Date().toISOString() } : actual;
+            return linkedPlan ? { ...actual, planningEntryId: linkedPlan.id, updatedAt: actual.updatedAt || new Date().toISOString() } : actual;
           });
           setProductionActuals(migratedActuals);
+          setOeeHistory(Array.isArray(parsed.oeeHistory) ? parsed.oeeHistory : []);
+          setOeeSettings(buildOeeSettingsFoundation(parsed.oeeSettings ?? defaultOeeSettings()));
           setPlanningWeeks(storedWeeks);
           setActiveWeekStart(parsed.activeWeekStart || legacyPlanning.weekStart);
-          setHorizon(parsed.horizon || 10);
+          setHorizon(normalizePlanningHorizon(parsed.horizon));
           setSelectedProductionLine(parsed.selectedProductionLine || "blowMoulding");
         } else {
           const seed = loadBlowMoldingData();
@@ -445,7 +455,7 @@ function MRPPlannerCore({ currentUser, users, onSaveUsers, onLogout, onChangePas
       try {
         await window.storage.set(
           "mrp-data",
-          JSON.stringify({ items, demands, openOrders, planning, planningWeeks, activeWeekStart, selectedProductionLine, horizon, productionActuals, cycleCountDays, sysproTransactions, openingWipBalances, closingWipBalances, reconciliationTolerances }),
+          JSON.stringify({ items, demands, openOrders, planning, planningWeeks, activeWeekStart, selectedProductionLine, horizon, productionActuals, oeeHistory, oeeSettings, cycleCountDays, sysproTransactions, openingWipBalances, closingWipBalances, reconciliationTolerances }),
           false
         );
         setSaveState("saved");
@@ -454,7 +464,7 @@ function MRPPlannerCore({ currentUser, users, onSaveUsers, onLogout, onChangePas
       }
     }, 600);
     return () => clearTimeout(saveTimer.current);
-  }, [items, demands, openOrders, planningWeeks, activeWeekStart, selectedProductionLine, horizon, productionActuals, cycleCountDays, sysproTransactions, openingWipBalances, closingWipBalances, reconciliationTolerances, loaded]);
+  }, [items, demands, openOrders, planningWeeks, activeWeekStart, selectedProductionLine, horizon, productionActuals, oeeHistory, oeeSettings, cycleCountDays, sysproTransactions, openingWipBalances, closingWipBalances, reconciliationTolerances, loaded]);
 
   const planning = useMemo(() => { const source = planningWeeks[activeWeekStart] || { weekStart: activeWeekStart, entries: [] }; return { ...source, entries: (source.entries || []).filter((entry) => entryProductionLine(entry) === selectedProductionLine) }; }, [planningWeeks, activeWeekStart, selectedProductionLine]);
   const setPlanning = useCallback((value) => {
@@ -524,13 +534,13 @@ function MRPPlannerCore({ currentUser, users, onSaveUsers, onLogout, onChangePas
   const materialReconciliation = useMemo(() => deriveMaterialReconciliation({ productionActuals: activeActualsForReconciliation, items, boms, sysproTransactions, openingWipBalances, closingWipBalances, tolerances: reconciliationTolerances, period: reconciliationPeriod }), [activeActualsForReconciliation, items, boms, sysproTransactions, openingWipBalances, closingWipBalances, reconciliationTolerances, reconciliationPeriod]);
   const reconciliationAvailable = sysproTransactions.length > 0 && openingWipBalances.length > 0 && closingWipBalances.length > 0;
 
-  const monday = useMemo(() => getMonday(new Date()), []);
+  const monday = useMemo(() => new Date(`${activeWeekStart}T00:00:00`), [activeWeekStart]);
   const weeks = useMemo(
     () => Array.from({ length: horizon }, (_, i) => addDays(monday, i * 7)),
     [horizon, monday]
   );
   const mrpCompatibleBoms = useMemo(() => { const ids = new Map(items.map((item) => [String(item.code || "").trim().toUpperCase(), item.id])); return boms.map((bom, index) => ({ id: `syspro_${index}`, parentId: ids.get(String(bom.parentStockCode || "").trim().toUpperCase()), componentId: ids.get(String(bom.componentStockCode || "").trim().toUpperCase()), qtyPer: bom.qtyPer })).filter((bom) => bom.parentId && bom.componentId); }, [items, boms]);
-  const mrp = useMemo(() => runMRP(items, mrpCompatibleBoms, demands, openOrders, horizon, monday), [items, mrpCompatibleBoms, demands, openOrders, horizon, monday, mrpRunVersion]);
+  const mrp = useMemo(() => runMRP(items, mrpCompatibleBoms, horizonOrders(demands, activeWeekStart, horizon), horizonOrders(openOrders, activeWeekStart, horizon), horizon, monday), [items, mrpCompatibleBoms, demands, openOrders, horizon, monday, activeWeekStart, mrpRunVersion]);
 
   const itemById = useCallback((id) => items.find((i) => i.id === id), [items]);
 
@@ -570,9 +580,11 @@ function MRPPlannerCore({ currentUser, users, onSaveUsers, onLogout, onChangePas
   const navItems = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, permission: "dashboard" },
     { id: "planning", label: "Planning", icon: CalendarRange, permission: "planning" },
+    { id: "production-mrp", label: "Production MRP", icon: ClipboardList, permission: "productionMrp" },
     { id: "actuals", label: "Production Actuals", icon: CheckCircle2, permission: "actuals" },
     { id: "cycle-count", label: "Cycle Count", icon: ClipboardCheck, permission: "cycleCount" },
-    { id: "production-mrp", label: "Production MRP", icon: ClipboardList, permission: "productionMrp" },
+    { id: "production-scrap", label: "Production Scrap", icon: LayoutDashboard, permission: "dashboard" },
+    { id: "oee", label: "OEE", icon: LayoutDashboard, permission: "dashboard" },
     { id: "items", label: "Items", icon: Package, permission: "items" },
     { id: "bom", label: "Bill of Materials", icon: ListTree, permission: "bom" },
     { id: "ledger", label: "Planning Ledger", icon: PlayCircle, permission: "ledger" },
@@ -644,14 +656,12 @@ function MRPPlannerCore({ currentUser, users, onSaveUsers, onLogout, onChangePas
             <div style={{ fontSize: 11, color: T.sidebarTextDim, marginBottom: 6 }}>PLANNING HORIZON</div>
             <select
               value={horizon}
-              onChange={(e) => setHorizon(Number(e.target.value))}
+              onChange={(e) => setHorizon(normalizePlanningHorizon(e.target.value))}
               style={{ width: "100%", background: T.inkSoft, color: "#fff", border: `1px solid #3A4557`, borderRadius: 3, padding: "5px 6px", fontSize: 12 }}
             >
-              <option value={6}>6 weeks</option>
-              <option value={10}>10 weeks</option>
-              <option value={14}>14 weeks</option>
-              <option value={20}>20 weeks</option>
+              {PLANNING_HORIZONS.map(value => <option key={value} value={value}>{value} {value === 1 ? 'week' : 'weeks'}</option>)}
             </select>
+            <div style={{ color: T.sidebarTextDim, fontSize: 10, marginTop: 6 }}>Ledger analysis from the selected week. Planning, Dashboard and Production MRP show the active week.</div>
           </div>
 
           <div style={{ marginTop: 20, display: "flex", flexDirection: "column", gap: 8, padding: "0 8px" }}>
@@ -701,10 +711,28 @@ function MRPPlannerCore({ currentUser, users, onSaveUsers, onLogout, onChangePas
           {tab === "dashboard" && (
             <PlannerDashboard planning={planning} productionActuals={productionActuals} productionMrp={productionMrp} materialReconciliation={materialReconciliation} reconciliationAvailable={reconciliationAvailable} sysproStatus={sysproStatus} sysproLastUpdated={sysproLastUpdated} productionLine={selectedProductionLine} />
           )}
+          {tab === "production-scrap" && <ProductionScrap />}
+          {tab === "oee" && (
+            <OeeModuleShell
+              planningWeeks={planningWeeks}
+              actuals={productionActuals}
+              setActuals={setProductionActuals}
+              settings={oeeSettings}
+              setSettings={setOeeSettings}
+              productionLine={selectedProductionLine}
+              setProductionLine={setSelectedProductionLine}
+              editable={can(currentUser, "planning", "edit")}
+              weekStart={activeWeekStart}
+              currentUser={currentUser}
+              initialPlanningEntryId={oeeInputEntryId}
+              oeeHistory={oeeHistory}
+              setOeeHistory={setOeeHistory}
+            />
+          )}
           {tab === "planning" && <BlowMouldingPlanningBoard planning={planning} setPlanning={setPlanning} onWeekChange={selectPlanningWeek} logo={atdLogo} items={items} boms={boms} editable={can(currentUser, "planning", "edit")} canAdjust={can(currentUser, "planAdjustments", "edit")} onAdjustPlan={adjustPlanningEntry} currentUserId={currentUser.id} productionLine={selectedProductionLine} bomStatus={bomStatus} onRefreshBom={refreshSysproBom} />}
-          {tab === "actuals" && <ProductionActuals actuals={productionActuals} setActuals={setProductionActuals} planning={planning} onWeekChange={selectPlanningWeek} items={items} boms={boms} sysproTransactions={sysproTransactions} openingWipBalances={openingWipBalances} closingWipBalances={closingWipBalances} tolerances={reconciliationTolerances} editable={can(currentUser, "actuals", "edit")} canAdjust={can(currentUser, "planAdjustments", "edit")} onAdjustPlan={adjustPlanningEntry} users={users} currentUserId={currentUser.id} productionLine={selectedProductionLine} bomStatus={bomStatus} />}
+          {tab === "actuals" && <ProductionActuals actuals={productionActuals} setActuals={setProductionActuals} planning={planning} onWeekChange={selectPlanningWeek} items={items} boms={boms} sysproTransactions={sysproTransactions} openingWipBalances={openingWipBalances} closingWipBalances={closingWipBalances} tolerances={reconciliationTolerances} editable={can(currentUser, "actuals", "edit")} canAdjust={can(currentUser, "planAdjustments", "edit")} onAdjustPlan={adjustPlanningEntry} onOpenOee={(planningEntryId) => { setOeeInputEntryId(planningEntryId); setTab("oee"); }} users={users} currentUserId={currentUser.id} productionLine={selectedProductionLine} bomStatus={bomStatus} />}
           {tab === "cycle-count" && <CycleCount days={cycleCountDays} setDays={setCycleCountDays} inventory={sysproInventory} inventoryStatus={sysproStatus} productionLine={selectedProductionLine} users={users} currentUser={currentUser} canSetup={can(currentUser, "cycleCountSetup", "edit")} canCount={can(currentUser, "cycleCount", "edit")} canReopen={can(currentUser, "cycleCountReopen", "edit")} />}
-          {tab === "production-mrp" && <ProductionMRP planning={planning} items={itemsWithLiveStock} boms={boms} productionMrp={productionMrp} bomStatus={bomStatus} />}
+          {tab === "production-mrp" && <ProductionMRP planning={planning} items={itemsWithLiveStock} boms={boms} productionMrp={productionMrp} bomStatus={bomStatus} productionLine={selectedProductionLine} />}
           {tab === "items" && <ItemsTab inventory={sysproInventory} status={sysproStatus} lastUpdated={sysproLastUpdated} onRefresh={refreshSysproStock} />}
           {tab === "bom" && <SysproBomExplorer boms={boms} status={bomStatus} onRefresh={refreshSysproBom} />}
           {tab === "ledger" && (
