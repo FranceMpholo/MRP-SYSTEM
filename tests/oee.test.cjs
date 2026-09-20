@@ -7,7 +7,7 @@ const plan = { id: 'p1', day: '2026-09-07', shift: 'SHIFT 01', machine: 'BM01', 
 const actual = { id: 'a1', planningEntryId: 'p1', actualMouldQty: 90, oee: { runTime: 400, noTubs: 20, goodParts: 80 } };
 const filters = { startDate: '2026-09-07', endDate: '2026-09-07', machine: '', shift: '', product: '' };
 const close = (a, b) => assert.ok(Math.abs(a - b) < 1e-10, `${a} != ${b}`);
-const standardNictWorkbookRows = require('./fixtures/oee-standard-nict-workbook.json');
+const syntheticNictCases = require('./fixtures/oee-standard-nict-workbook.json');
 
 test('Excel formulas, normal Internal OEE and exact zero fallback', async () => {
   const d = await derive;
@@ -223,60 +223,70 @@ test('Excel-style OEE engine resolves NICT, revised plan, target, status and los
   assert.deepEqual(result.issues, []);
 });
 
-test('STANDARD_NICT reproduces selected MainData Table rows at workbook precision', async () => {
+test('STANDARD_NICT evaluates self-contained synthetic forming, robot, and zero-boundary cases', async () => {
   const d = await derive;
 
-  for (const row of standardNictWorkbookRows) {
+  for (const scenario of syntheticNictCases) {
     const result = d.deriveOeeRun({
-      planningEntryId: `workbook-row-${row.sourceRow}`,
-      date: row.date,
-      productionLine: row.line,
-      process: row.process,
-      variant: row.variant,
-      suffix: row.suffix,
-      plannedTimeMinutes: row.plannedTime,
-      plannedBreakMinutes: row.plannedBreaks,
-      totalDowntimeMinutes: row.totalDowntime,
-      runTimeMinutes: row.runTime,
-      totalProduced: row.totalPartsProduced,
-      goodParts: row.goodParts,
-      scrapParts: row.scrapParts,
-      noTubsNoStillagesMinutes: row.noTubsNoStillages,
-      nictSource: row.baseline.excelNictSource,
+      planningEntryId: `test-plan-${scenario.scenarioId}`,
+      date: scenario.date,
+      productionLine: scenario.productionLine,
+      machine: scenario.machine,
+      process: scenario.process,
+      stockCode: scenario.stockCode,
+      variant: scenario.variant,
+      suffix: scenario.suffix,
+      plannedTimeMinutes: scenario.plannedTimeMinutes,
+      plannedBreakMinutes: scenario.plannedBreakMinutes,
+      totalDowntimeMinutes: scenario.totalDowntimeMinutes,
+      runTimeMinutes: scenario.runTimeMinutes,
+      totalProduced: scenario.totalProduced,
+      goodParts: scenario.goodParts,
+      scrapParts: scenario.scrapParts,
+      noTubsNoStillagesMinutes: scenario.noTubsNoStillagesMinutes,
+      nictSource: scenario.cycleTime.nictSource,
       settings: {
         cycleTimes: [{
-          variant: row.variant,
-          suffix: row.suffix,
-          process: row.process,
+          stockCode: scenario.stockCode,
+          variant: scenario.variant,
+          suffix: scenario.suffix,
+          process: scenario.process,
           active: true,
-          nictFormingSeconds: row.baseline.nictFormingSeconds,
-          nictRobotSeconds: row.baseline.nictRobotSeconds,
-          jpd: row.baseline.jpd,
+          nictFormingSeconds: scenario.cycleTime.nictFormingSeconds,
+          nictRobotSeconds: scenario.cycleTime.nictRobotSeconds,
         }],
         specialRules: { STANDARD_NICT: true, CE_AGGREGATED: false, THERMO_ASSEMBLY_LINKED: false },
       },
     });
 
-    assert.equal(result.strategy, 'STANDARD_NICT', `MainData Table row ${row.sourceRow}`);
-    assert.equal(result.status, 'COMPLETE', `MainData Table row ${row.sourceRow}`);
-    assert.equal(result.nictSource, 'NICT_ROBOT', `MainData Table row ${row.sourceRow}`);
-    close(result.nictSeconds, row.baseline.nictRobotSeconds);
-    close(result.runTimeMinutes, row.runTime);
-    close(result.revisedPlanQty, row.revisedPlan);
-    close(result.targetQty, row.target);
-    close(result.availability, row.availability);
-    close(result.performance, row.performance);
-    close(result.productivity, row.productivity);
-    close(result.quality, row.quality);
-    close(result.externalOee, row.externalOeeFormula);
-    close(result.internalOee, row.internalOee);
+    assert.equal(result.strategy, 'STANDARD_NICT', scenario.scenarioId);
+    assert.equal(result.status, 'COMPLETE', scenario.scenarioId);
+    assert.equal(result.nictSource, scenario.cycleTime.nictSource, scenario.scenarioId);
+    close(result.nictSeconds, scenario.expected.nictSeconds);
+    close(result.cycleTimeMinutes, scenario.expected.cycleTimeMinutes);
+    close(result.runTimeMinutes, scenario.runTimeMinutes);
+    close(result.revisedPlanQty, scenario.expected.revisedPlanQty);
+    close(result.targetQty, scenario.expected.targetQty);
+    close(result.availability, scenario.expected.availability);
+    close(result.performance, scenario.expected.performance);
+    close(result.productivity, scenario.expected.productivity);
+    close(result.quality, scenario.expected.quality);
+    close(result.externalOee, scenario.expected.externalOee);
+    close(result.internalOee, scenario.expected.internalOee);
   }
 });
 
-test('STANDARD_NICT retains the clean formula result instead of MainData Table X2 manual override', async () => {
-  const row = standardNictWorkbookRows.find((candidate) => candidate.sourceRow === 2);
-  assert.notEqual(row.externalOeeWorkbookCached, row.externalOeeFormula);
-  close(row.externalOeeFormula, row.availability * row.quality * row.performance);
+test('synthetic STANDARD_NICT expectations use formula products without external cached values', () => {
+  for (const scenario of syntheticNictCases) {
+    close(
+      scenario.expected.externalOee,
+      scenario.expected.availability * scenario.expected.quality * scenario.expected.performance,
+    );
+    close(
+      scenario.expected.internalOee,
+      scenario.expected.productivity * scenario.expected.quality * scenario.expected.performance,
+    );
+  }
 });
 
 test('Excel-style OEE engine reports missing NICT and invalid scrap/time issues without zeroing out', async () => {

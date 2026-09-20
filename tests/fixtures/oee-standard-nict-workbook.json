@@ -1,0 +1,107 @@
+[
+  {
+    "scenarioId": "synthetic-forming-cycle",
+    "date": "2099-01-15",
+    "productionLine": "TEST-LINE",
+    "machine": "TEST-MACHINE-001",
+    "process": "TEST-FORMING",
+    "stockCode": "TEST-OEE-PARENT-001",
+    "variant": "TEST-VARIANT-001",
+    "suffix": "TEST-SUFFIX-001",
+    "plannedTimeMinutes": 120,
+    "plannedBreakMinutes": 20,
+    "totalDowntimeMinutes": 10,
+    "runTimeMinutes": 90,
+    "totalProduced": 72,
+    "goodParts": 54,
+    "scrapParts": 18,
+    "noTubsNoStillagesMinutes": 0,
+    "cycleTime": {
+      "nictSource": "NICT_FORMING",
+      "nictFormingSeconds": 60,
+      "nictRobotSeconds": 150
+    },
+    "expected": {
+      "nictSeconds": 60,
+      "cycleTimeMinutes": 1,
+      "revisedPlanQty": 100,
+      "targetQty": 90,
+      "availability": 0.9,
+      "performance": 0.8,
+      "productivity": 0.9,
+      "quality": 0.75,
+      "externalOee": 0.54,
+      "internalOee": 0.54
+    }
+  },
+  {
+    "scenarioId": "synthetic-robot-cycle-with-time-addend",
+    "date": "2099-02-20",
+    "productionLine": "TEST-LINE",
+    "machine": "TEST-MACHINE-002",
+    "process": "TEST-ROBOT",
+    "stockCode": "TEST-OEE-PARENT-002",
+    "variant": "TEST-VARIANT-002",
+    "suffix": "TEST-SUFFIX-002",
+    "plannedTimeMinutes": 240,
+    "plannedBreakMinutes": 40,
+    "totalDowntimeMinutes": 20,
+    "runTimeMinutes": 180,
+    "totalProduced": 72,
+    "goodParts": 72,
+    "scrapParts": 0,
+    "noTubsNoStillagesMinutes": 20,
+    "cycleTime": {
+      "nictSource": "NICT_ROBOT",
+      "nictFormingSeconds": 30,
+      "nictRobotSeconds": 120
+    },
+    "expected": {
+      "nictSeconds": 120,
+      "cycleTimeMinutes": 2,
+      "revisedPlanQty": 100,
+      "targetQty": 90,
+      "availability": 0.9,
+      "performance": 0.8,
+      "productivity": 1,
+      "quality": 1,
+      "externalOee": 0.72,
+      "internalOee": 0.8
+    }
+  },
+  {
+    "scenarioId": "synthetic-exact-zero-boundary",
+    "date": "2099-03-25",
+    "productionLine": "TEST-LINE",
+    "machine": "TEST-MACHINE-003",
+    "process": "TEST-ZERO",
+    "stockCode": "TEST-OEE-PARENT-003",
+    "variant": "TEST-VARIANT-003",
+    "suffix": "TEST-SUFFIX-003",
+    "plannedTimeMinutes": 60,
+    "plannedBreakMinutes": 0,
+    "totalDowntimeMinutes": 60,
+    "runTimeMinutes": 0,
+    "totalProduced": 0,
+    "goodParts": 0,
+    "scrapParts": 0,
+    "noTubsNoStillagesMinutes": 0,
+    "cycleTime": {
+      "nictSource": "NICT_FORMING",
+      "nictFormingSeconds": 90,
+      "nictRobotSeconds": 180
+    },
+    "expected": {
+      "nictSeconds": 90,
+      "cycleTimeMinutes": 1.5,
+      "revisedPlanQty": 40,
+      "targetQty": 0,
+      "availability": 0,
+      "performance": 0,
+      "productivity": 0,
+      "quality": 0,
+      "externalOee": 0,
+      "internalOee": 0
+    }
+  }
+]
