@@ -1,0 +1,86 @@
+.production-overview { display: grid; gap: 24px; color: #1b2430; }
+.production-overview-header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 16px 24px; }
+.production-overview h1 { margin: 5px 0 0; font-size: 26px; line-height: 1.2; letter-spacing: -.025em; }
+.production-unavailable h1 { margin: 3px 0; font-size: 22px; }
+.production-overview h2 { margin: 0 0 5px; font-size: 16px; line-height: 1.3; letter-spacing: -.015em; }
+.production-overview p, .production-unavailable p { margin: 0; line-height: 1.45; font-size: 12px; }
+.production-eyebrow { color: #197b80; font-size: 10px !important; font-weight: 700; letter-spacing: .1em; }
+.production-period-controls { display: grid; gap: 7px; min-width: 0; font-size: 12px; }
+.production-period-label { display: flex; align-items: center; justify-content: flex-end; gap: 8px; color: #52656d; }
+.production-period-label > svg { flex: none; color: #197b80; }
+.production-week-buttons { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.production-period-controls button, .production-overview-back { display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 8px 10px; border: 1px solid #c9c2ae; border-radius: 4px; background: white; color: #1b2430; font: inherit; font-size: 11px; cursor: pointer; }
+/* Equal fractional rows use the tallest card's intrinsic size across the whole
+   grid. No fixed height, clipping or line clamp: wrapped/zoomed text grows all rows. */
+.production-overview-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-auto-rows: 1fr; align-items: stretch; gap: 18px; }
+.production-overview-card { position: relative; display: grid; grid-template-rows: auto 1fr auto; gap: 18px; min-width: 0; overflow-wrap: anywhere; padding: 20px; border: 1px solid #dce3e3; border-radius: 12px; background: #fff; box-shadow: 0 2px 5px #1b243005; cursor: pointer; transition: border-color 160ms ease, box-shadow 160ms ease; }
+.production-overview-card:hover { border-color: #99b9bc; box-shadow: 0 5px 16px #1b24300d; }
+.production-overview-card:has(.production-card-target:focus-visible) { outline: 3px solid #197b80; outline-offset: 3px; }
+.production-overview-card > header { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: 12px; min-block-size: 66px; }
+.production-card-heading { min-width: 0; padding-top: 2px; }
+.production-card-controls { display: flex; align-items: center; gap: 7px; }
+.production-overview-card > header p { color: #61727b; font-size: 12px; }
+.production-card-icon { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; border-radius: 10px; background: #eaf3f2; color: #197b80; }
+.production-card-arrow { flex: none; color: #197b80; }
+.production-card-target { padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+/* The sibling info button sits above the navigation button's full-card hit area. */
+.production-card-target::after { position: absolute; inset: 0; z-index: 1; border-radius: 12px; content: ""; }
+.production-card-target:focus-visible { outline: none; }
+.production-card-info { position: relative; z-index: 2; display: inline-flex; align-items: center; justify-content: center; flex: none; width: 32px; height: 32px; padding: 5px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: #61727b; cursor: pointer; }
+.production-card-info:hover, .production-card-info[aria-expanded="true"] { border-color: #83acaf; background: #e7f0ef; }
+.production-card-info:focus-visible, .production-card-popover button:focus-visible { outline: 2px solid #0868b2; outline-offset: 2px; }
+.production-card-meta { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 12px; min-block-size: 54px; padding-top: 14px; border-top: 1px solid #edf0f0; }
+.production-card-meta > div { flex: 1 1 130px; min-width: 0; }
+.production-card-period-label { display: block; margin-bottom: 3px; color: #61727b; font-size: 10px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+.production-card-period { color: #52656d; font-size: 11px !important; }
+.production-card-body { display: grid; align-content: center; min-block-size: 116px; }
+.production-card-body:has(.production-card-metrics) { align-content: end; }
+.production-card-empty { display: grid; align-content: center; gap: 10px; }
+.production-card-empty > span { color: #a7b5bb; font-size: 30px; line-height: 1; }
+.production-card-empty > p { max-width: 26ch; color: #52656d; font-size: 16px; font-weight: 500; line-height: 1.45; }
+.production-state { justify-self: start; color: #315d60; background: #edf3f2; padding: 3px 6px; border-radius: 3px; font-size: 10px; font-weight: 600; }
+.production-card-meta .production-state { max-width: 100%; padding: 5px 8px; border: 1px solid #e6ebed; border-radius: 6px; background: #f3f5f6; color: #52616d; font-size: 10px; line-height: 1.4; }
+.production-card-meta .production-state-complete { border-color: #dcebe4; background: #eef6f1; color: #33674e; }
+.production-card-meta .production-state-warning { border-color: #eee1c7; background: #fbf5e9; color: #815b20; }
+.production-card-meta .production-state-preview { border-color: #dbeae9; background: #eff6f5; color: #315d60; }
+.production-card-metrics { display: grid; gap: 8px; margin: 0; }
+.production-card-metrics > div { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); align-items: baseline; gap: 12px; min-block-size: 30px; }
+.production-card-metrics dt { color: #61727b; font-size: 12px; line-height: 1.45; }
+.production-card-metrics dd { margin: 0; text-align: right; font-size: 22px; font-weight: 600; line-height: 1.3; font-variant-numeric: tabular-nums; letter-spacing: -.025em; }
+.production-card-metrics dd small { font-size: 11px; font-weight: 400; letter-spacing: 0; color: #61727b; }
+.production-card-metrics dd.is-unavailable { font-size: 16px; font-weight: 500; letter-spacing: 0; color: #61727b; }
+.production-card-caption { color: #746c5c; font-size: 11px !important; }
+.production-card-warning { color: #a6362b; font-size: 11px !important; }
+.production-period-controls button:focus-visible, .production-overview-back:focus-visible { outline: 2px solid #0868b2; outline-offset: 3px; }
+.production-overview-back { margin-bottom: 12px; }
+.production-unavailable { display: grid; gap: 16px; max-width: 800px; padding: 24px; background: #fff; border: 1px solid #e3dfd2; border-radius: 6px; }
+.production-card-popover { position: fixed; z-index: 2000; box-sizing: border-box; width: min(380px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); margin: 0; padding: 14px; overflow: auto; overscroll-behavior: contain; overflow-wrap: anywhere; border: 1px solid #83acaf; border-radius: 6px; background: #fff; color: #1b2430; font-size: 12px; line-height: 1.5; box-shadow: 0 8px 30px #1b24302b; }
+.production-card-popover > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; position: sticky; top: 0; background: #fff; }
+.production-card-popover h3 { margin: 0; padding-top: 3px; font-size: 14px; line-height: 1.4; }
+.production-card-popover button { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 28px; height: 28px; padding: 5px; border: 1px solid #e3dfd2; border-radius: 4px; background: #fff; color: #1b2430; cursor: pointer; }
+.production-card-popover-content { display: grid; gap: 10px; margin-top: 10px; }
+.production-card-popover p { margin: 0; }
+@media (max-width: 1279px) {
+  .production-overview-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (min-width: 701px) and (max-width: 1100px), (max-width: 480px) {
+  .production-overview-card > header { grid-template-columns: minmax(0, 1fr) auto; }
+  .production-card-icon { grid-column: 1; grid-row: 1; }
+  .production-card-controls { grid-column: 2; grid-row: 1; }
+  .production-card-heading { grid-column: 1 / -1; grid-row: 2; }
+}
+@media (max-width: 700px) {
+  .production-overview-grid { grid-template-columns: minmax(0, 1fr); }
+  .production-overview-header { align-items: flex-start; }
+  .production-period-controls { width: 100%; }
+  .production-period-label, .production-week-buttons { justify-content: flex-start; }
+}
+@media (max-width: 480px) {
+  .production-overview { gap: 20px; }
+  .production-overview-card { padding: 18px; }
+  .production-week-buttons { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .production-week-buttons button { padding: 8px 6px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .production-overview-card { transition: none; }
+}

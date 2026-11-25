@@ -27,22 +27,23 @@ export function deriveDashboardSummary({ planning = {}, productionActuals = [], 
 
   const childrenByCode = new Map((productionMrp.childRequirements || []).map((child) => [child.stockCode, child]));
   const requestsByCode = new Map((productionMrp.storeRequests || []).map((child) => [child.stockCode, child]));
+  const materialsIncomplete = productionMrp.complete === false;
   const reconciliationByCode = new Map((materialReconciliation.rows || []).map((row) => [row.stockCode, row]));
   const materialsToRequest = [...requestsByCode.values()].filter((child) => number(child.storeRequestQty) > 0).length;
   const rawShortages = [...requestsByCode.values()].filter((child) => number(child.rawShortage) > 0).length;
   const materialVariances = (materialReconciliation.rows || []).filter((row) => row.status === "Consumption variance" || row.status === "Stock balance variance").length;
   const attentionCodes = new Set([
-    ...[...requestsByCode.values()].filter((row) => number(row.productionShortfall) > 0 || number(row.rawShortage) > 0 || number(row.packSize) <= 0).map((row) => row.stockCode),
+    ...[...requestsByCode.values()].filter((row) => row.productionShortfall === null || row.storeRequestQty === null || number(row.productionShortfall) > 0 || number(row.rawShortage) > 0 || number(row.packSize) <= 0).map((row) => row.stockCode),
     ...(reconciliationAvailable ? (materialReconciliation.rows || []).filter((row) => row.status !== "Tied").map((row) => row.stockCode) : []),
   ]);
   const materialAttention = [...attentionCodes].map((stockCode) => {
     const mrp = childrenByCode.get(stockCode) || requestsByCode.get(stockCode);
     const reconciliation = reconciliationByCode.get(stockCode);
     const reconciliationStatus = reconciliationAvailable && reconciliation?.status !== "Tied" ? reconciliation.status : null;
-    return { stockCode, description: mrp?.description || reconciliation?.description || "No description", expectedConsumptionQty: reconciliation?.expectedConsumptionQty ?? null, systemConsumptionQty: reconciliationAvailable ? reconciliation?.systemConsumptionQty ?? null : null, consumptionVarianceQty: reconciliationAvailable ? reconciliation?.consumptionVarianceQty ?? null : null, productionShortfall: mrp?.productionShortfall ?? 0, rawShortageQty: mrp?.rawShortage ?? 0, status: reconciliationStatus || mrp?.status || "No request required" };
+    return { stockCode, description: mrp?.description || reconciliation?.description || "No description", expectedConsumptionQty: reconciliation?.expectedConsumptionQty ?? null, systemConsumptionQty: reconciliationAvailable ? reconciliation?.systemConsumptionQty ?? null : null, consumptionVarianceQty: reconciliationAvailable ? reconciliation?.consumptionVarianceQty ?? null : null, productionShortfall: mrp ? mrp.productionShortfall : null, rawShortageQty: mrp ? mrp.rawShortage : null, status: reconciliationStatus || mrp?.status || "No request required" };
   }).sort((a, b) => (attentionPriority[a.status] ?? 7) - (attentionPriority[b.status] ?? 7) || number(b.rawShortageQty) - number(a.rawShortageQty) || a.stockCode.localeCompare(b.stockCode));
 
-  return { originalPlannedSets, plannedSets, planAdjustment: plannedSets - originalPlannedSets, actualSets, productionVariance, achievementPct, productSummary, childMaterials: childrenByCode.size, materialsToRequest, rawShortages, materialVariances, machinePerformance, materialAttention, reconciliationIndicators: { tied: number(materialReconciliation.summary?.tied), pendingBkf: number(materialReconciliation.summary?.pendingBkf), dataIssues: number(materialReconciliation.summary?.dataIssues) } };
+  return { originalPlannedSets, plannedSets, planAdjustment: plannedSets - originalPlannedSets, actualSets, productionVariance, achievementPct, productSummary, childMaterials: childrenByCode.size, materialsIncomplete, materialsToRequest: materialsIncomplete ? null : materialsToRequest, rawShortages: materialsIncomplete ? null : rawShortages, materialVariances, machinePerformance, materialAttention, reconciliationIndicators: { tied: number(materialReconciliation.summary?.tied), pendingBkf: number(materialReconciliation.summary?.pendingBkf), dataIssues: number(materialReconciliation.summary?.dataIssues) } };
 }
 
 export default deriveDashboardSummary;
