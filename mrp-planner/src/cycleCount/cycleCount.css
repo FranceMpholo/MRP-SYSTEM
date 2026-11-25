@@ -3,6 +3,10 @@
 .cc-header span { color:#0868b2; font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:.06em; }
 .cc-header h1 { margin:3px 0; font-size:25px; color:#1b2430; }
 .cc-header p { margin:0; color:#746c5c; }
+.cc-scope { margin:-7px 0 12px; color:#746c5c; font-size:11px; }
+.cc-eos-source { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:10px 12px; margin-bottom:12px; background:#eaf3fa; border:1px solid #c4d9e9; font-size:11px; }
+.cc-eos-source div { display:flex; flex-direction:column; gap:4px; }
+.cc-eos-source span { color:#526374; }
 .cc-header label,.cc-assignment label { display:flex; flex-direction:column; gap:5px; font-size:11px; color:#746c5c; text-transform:uppercase; }
 .cc-header input,.cc-assignment select,.cc-entry input,.cc-entry select { border:1px solid #c9c2ae; border-radius:3px; background:#fff; padding:7px 8px; color:#232323; }
 .cc-mode,.cc-shifts { display:flex; gap:5px; border-bottom:1px solid #c9c2ae; margin-bottom:14px; }
@@ -44,7 +48,14 @@
 .cc-status.variance { background:#f3e1de; color:#a6362b; }
 .cc-submit { display:flex; justify-content:flex-end; padding-top:12px; }
 .cc-submit button:disabled { opacity:.45; cursor:not-allowed; }
+.required-progress { margin-left:0; text-align:left; }
+.cc-required-tag { display:block; width:max-content; margin-top:4px; padding:2px 5px; border-radius:3px; background:#eaf3fa; color:#0868b2; font:600 9px/1.4 sans-serif; letter-spacing:0; }
+.cc-input-error,.cc-legacy { padding:9px 11px; background:#fff0ee; border:1px solid #e2b3ad; border-radius:4px; color:#8b3027; font-size:11px; margin:8px 0; }
+.cc-count-audit { display:block; max-width:180px; color:#746c5c; font-size:9px; white-space:normal; line-height:1.35; margin-top:3px; }
+.cc-legacy-label { color:#8b3027; font-size:10px; }
 .cc-summary-assignments { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-bottom:12px; }
 .cc-summary-assignments div { background:#fff; border:1px solid #e3dfd2; padding:11px; display:flex; flex-direction:column; gap:4px; }
 .cc-summary th { text-align:center; background:#dfeaf3; }
 .cc-summary td { white-space:nowrap; }
+.cc-movement { min-width:108px; white-space:nowrap; background:#f2f7fb; }
+.cc-movement-source { background:#f2f7fb; }
