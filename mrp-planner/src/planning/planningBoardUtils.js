@@ -18,7 +18,7 @@ export const PART_ALIASES = {
   "N1XB-16450-BA": "BA", "N1XB-16451-BA": "BA",
 };
 
-export function buildPlanningParents(items = [], boms = []) {
+export function buildPlanningParents(items = [], boms = [], { includePairedMembers = false } = {}) {
   const syspro = boms.some((bom) => bom.parentStockCode);
   const parentCodes = new Set(boms.map((bom) => String(syspro ? bom.parentStockCode : items.find((item) => item.id === bom.parentId)?.code || "").trim().toUpperCase()).filter(Boolean));
   const descriptions = new Map(boms.map((bom) => [String(bom.parentStockCode || "").trim().toUpperCase(), bom.parentDescription]));
@@ -29,7 +29,7 @@ export function buildPlanningParents(items = [], boms = []) {
   const pairedCodes = new Set(pairs.flatMap((pair) => pair.parents));
   return [
     ...pairs.map((pair) => ({ id: pair.planningCode, stockCode: pair.planningCode, description: pair.description, alias: pair.displayCode, linkedParents: pair.parents, isPair: true })),
-    ...actualParents.filter((parent) => !pairedCodes.has(parent.stockCode)),
+    ...actualParents.filter((parent) => includePairedMembers || !pairedCodes.has(parent.stockCode)),
   ].sort((a, b) => (a.alias || a.stockCode).localeCompare(b.alias || b.stockCode) || a.stockCode.localeCompare(b.stockCode));
 }
 

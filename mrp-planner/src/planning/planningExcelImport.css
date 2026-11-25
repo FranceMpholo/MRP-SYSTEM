@@ -1,0 +1,66 @@
+.excel-plan-import { display: grid; gap: 12px; min-width: 0; margin-bottom: 16px; padding: 14px; border: 1px solid #c9c2ae; border-top: 2px solid #197b80; border-radius: 6px; background: #fff; color: #1b2430; font-size: 12px; }
+.excel-plan-import > header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
+.excel-plan-import h2 { margin: 0 0 4px; font-size: 17px; }
+.excel-plan-import h3 { margin: 0 0 8px; font-size: 14px; }
+.excel-plan-import p { margin: 4px 0; line-height: 1.5; }
+.excel-plan-import button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; width: fit-content; max-width: 100%; padding: 8px 10px; border: 1px solid #c9c2ae; border-radius: 4px; background: #fff; color: #1b2430; font: inherit; cursor: pointer; }
+.excel-plan-import button.primary { background: #176970; border-color: #176970; color: #fff; }
+.excel-plan-import button:disabled { cursor: not-allowed; opacity: .55; }
+.excel-plan-import :is(button,input,select):focus-visible { outline: 2px solid #0868b2; outline-offset: 2px; }
+.excel-import-actions,.excel-import-fields { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.excel-plan-import label { display: grid; gap: 4px; min-width: 0; font-size: 11px; }
+.excel-plan-import input:not([type=checkbox]),.excel-plan-import select { box-sizing: border-box; min-width: 0; max-width: 100%; width: 100%; padding: 7px; border: 1px solid #c9c2ae; border-radius: 3px; background: #fff; color: #1b2430; font: inherit; }
+.excel-plan-import .excel-check { display: flex; align-items: flex-start; gap: 7px; line-height: 1.5; }
+.excel-check input { flex: none; margin: 2px 0 0; }
+.excel-import-notice { background: #fff1c7; color: #765400; padding: 9px; border-radius: 4px; overflow-wrap: anywhere; }
+.excel-plan-import .excel-import-error { color: #a6362b; line-height: 1.5; }
+.excel-import-success { background: #e1ebe3; color: #2f6f4e; padding: 10px; }
+.excel-review-section { display: grid; gap: 10px; min-width: 0; padding-top: 14px; border-top: 1px solid #e3dfd2; }
+.excel-product-mapping { display: grid; gap: 9px; min-width: 0; margin: 0; padding: 12px; border: 1px solid #e3dfd2; border-radius: 4px; }
+.excel-product-mapping legend { color: #176970; font-weight: 600; overflow-wrap: anywhere; }
+.excel-review-table-wrap { max-width: 100%; min-width: 0; overflow: auto; }
+.excel-corrections-scroll { max-height: 72vh; }
+.excel-corrections-scroll thead th { position: sticky; top: 0; z-index: 1; }
+.excel-import-reviewed { color: #2f6f4e; }
+.excel-compact-summary { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; padding: 12px; background: #edf3f2; border-radius: 4px; }
+.excel-summary-counts { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; }
+.excel-summary-counts span { display: grid; gap: 3px; }
+.excel-summary-counts b { font-size: 23px; color: #176970; }
+.excel-profile-questions { display: grid; gap: 10px; }
+.excel-profile-question { display: grid; gap: 10px; min-width: 0; padding: 12px; margin: 0; border: 1px solid #c9c2ae; border-radius: 4px; }
+.excel-profile-question legend { font-weight: 600; color: #176970; }
+.excel-exception-cell { margin: 10px 0; border: 1px solid #dfc1b7; border-radius: 4px; padding: 10px; }
+.excel-exception-cell > button { margin: 4px 8px 8px 0; }
+.excel-exception-editor { padding: 10px 0; border-top: 1px solid #e3dfd2; }
+.excel-compact-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.excel-compact-table th,.excel-compact-table td { text-align: left; padding: 7px; border-bottom: 1px solid #e3dfd2; overflow-wrap: anywhere; }
+.excel-compact-table th { background: #edf3f2; }
+.excel-final-confirm { display: grid; gap: 10px; border-top: 1px solid #e3dfd2; padding-top: 12px; }
+.excel-plan-import details { min-width: 0; }
+.excel-review-table { width: 100%; min-width: 1050px; border-collapse: collapse; table-layout: fixed; }
+.excel-review-table th,.excel-review-table td { vertical-align: top; padding: 10px; border: 1px solid #e3dfd2; text-align: left; overflow-wrap: anywhere; }
+.excel-review-table th { background: #edf3f2; }
+.excel-review-table td > :is(label,button,p) { margin-bottom: 8px; }
+.excel-plan-import pre,.excel-import-source pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 8px 0; padding: 8px; border-radius: 3px; background: #f6f4ee; font: 11px/1.5 'IBM Plex Mono', monospace; }
+.excel-exclusions > div { margin: 8px 0; padding: 9px; border: 1px solid #e3dfd2; border-radius: 4px; }
+.excel-plan-import summary,.excel-import-source summary { cursor: pointer; font-weight: 600; }
+.excel-import-source { padding: 8px; border: 1px solid #c9c2ae; font-size: 11px; }
+.excel-import-history { margin-bottom: 14px; padding: 10px; border: 1px solid #c9c2ae; border-radius: 4px; background: #fff; font-size: 12px; }
+.excel-import-history details { margin: 10px 0; }
+.excel-import-history summary { cursor: pointer; font-weight: 600; }
+.excel-import-history pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+@media(max-width:700px) { .excel-plan-import { padding: 10px; } .excel-import-fields { align-items: stretch; } .excel-import-fields > label { flex: 1 1 100%; } }
+@media(max-width:700px) {
+  .excel-review-table,.excel-review-table tbody { display: block; width: 100%; min-width: 0; }
+  .excel-review-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .excel-review-table tbody tr { display: grid; grid-template-columns: minmax(0, 1fr); margin: 10px 0; border: 1px solid #c9c2ae; border-radius: 4px; }
+  .excel-review-table td { display: block; min-width: 0; border: 0; border-bottom: 1px solid #e3dfd2; }
+  .excel-review-table td::before { display: block; margin-bottom: 8px; color: #176970; font-weight: 600; }
+  .excel-corrections-table td:nth-child(1)::before { content: "Original source cell / order"; }
+  .excel-corrections-table td:nth-child(2)::before { content: "Corrected activity"; }
+  .excel-corrections-table td:nth-child(3)::before { content: "Readiness / exclusion"; }
+  .excel-additions-table td:nth-child(1)::before { content: "Order / source text"; }
+  .excel-additions-table td:nth-child(2)::before { content: "Line / machine / date / shift"; }
+  .excel-additions-table td:nth-child(3)::before { content: "Activity / product / quantity"; }
+  .excel-additions-table td:nth-child(4)::before { content: "Existing activities"; }
+}
