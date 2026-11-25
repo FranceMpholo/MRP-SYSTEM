@@ -24,7 +24,7 @@ const date = process.argv[2] || '2026-11-18';
     const parameters = [{ name: 'StartDay', type: sql.Date, value: new Date(`${date}T00:00:00Z`) },
       { name: 'EndDay', type: sql.Date, value: new Date(`${payload.windows.map((window) => window.endDayExclusive).sort().at(-1)}T00:00:00Z`) }];
     const journal = await db.query(`SELECT d.StockCode AS stockCode,d.Warehouse AS warehouse,d.TrnType AS trnType,
-        d.TrnQty AS journalQty,d.TransferFlag AS transferFlag,d.TransferToWh AS transferToWh,d.GtrReference,d.Uom,
+        d.TrnQty AS journalQty,d.TransferFlag AS transferFlag,d.TransferToWh AS transferToWh,d.GtrReference AS gtrReference,d.Uom,
         d.JnlYear,d.JnlMonth,d.Journal,d.EntryNumber,m.EntryDate AS entryDate,m.TrnTime AS trnTime,m.NewWarehouse AS newWarehouse
       FROM dbo.InvJournalDet d JOIN dbo.InvMovements m ON m.TrnYear=d.JnlYear AND m.TrnMonth=d.JnlMonth
         AND m.Journal=d.Journal AND m.JournalEntry=d.EntryNumber AND m.StockCode=d.StockCode AND m.Warehouse=d.Warehouse
@@ -54,12 +54,40 @@ const date = process.argv[2] || '2026-11-18';
         confirmedScrap: row.scrapConfirmed, regRows: row.regRows.length, bedliners: row.bedliners, tailgates: row.tailgates };
     });
     const fgJournal = selected.filter((row) => row.warehouse.trim() === 'B-FIN01' && row.trnType.trim() === 'T' && row.transferFlag.trim() === 'I');
+    const fgReferences = [...new Map(fgJournal.filter((row) => String(row.gtrReference || '').trim()).map((row) => {
+      const reference = { stockCode: row.stockCode.trim(), gtrReference: String(row.gtrReference).trim() };
+      return [[reference.stockCode, reference.gtrReference].join('/'), reference];
+    })).values()];
+    const sourceParameters = fgReferences.flatMap((row, i) => [
+      { name: `SourceCode${i}`, type: sql.VarChar(30), value: row.stockCode },
+      { name: `GtrReference${i}`, type: sql.VarChar(60), value: row.gtrReference },
+    ]);
+    const fgSources = fgReferences.length ? await db.query(`SELECT s.StockCode AS stockCode,s.Reference AS gtrReference,
+        MIN(LTRIM(RTRIM(s.Warehouse))) AS sourceWarehouseMin,MAX(LTRIM(RTRIM(s.Warehouse))) AS sourceWarehouseMax
+      FROM dbo.InvMovements s JOIN dbo.InvJournalDet j ON j.JnlYear=s.TrnYear AND j.JnlMonth=s.TrnMonth
+        AND j.Journal=s.Journal AND j.EntryNumber=s.JournalEntry AND j.StockCode=s.StockCode AND j.Warehouse=s.Warehouse
+      WHERE s.MovementType='I' AND s.TrnType='T' AND s.NewWarehouse='B-FIN01'
+        AND j.TrnType='T' AND j.TransferFlag='O' AND j.TransferToWh='B-FIN01'
+        AND j.GtrReference=s.Reference AND j.TrnQty=-s.TrnQty
+        AND (${fgReferences.map((_, i) => `(s.StockCode=@SourceCode${i} AND s.Reference=@GtrReference${i})`).join(' OR ')})
+      GROUP BY s.StockCode,s.Reference`, sourceParameters) : [];
+    const sourceByGtr = new Map(fgSources.map((row) => [[row.stockCode.trim(), row.gtrReference.trim()].join('/'), row]));
+    const verifiedFgJournal = fgJournal.filter((row) => {
+      const source = sourceByGtr.get([row.stockCode.trim(), String(row.gtrReference || '').trim()].join('/'));
+      return source?.sourceWarehouseMin === 'B-WIP01' && source.sourceWarehouseMax === 'B-WIP01';
+    });
     const fgApi = payload.postingData.rows.filter((row) => row.category === 'finishedGoods' && row.status === 'available' && row.shift);
     const fgByCode = [...new Set(fgApi.map((row) => row.stockCode))].map((stockCode) => {
       const apiQty = fgApi.filter((row) => row.stockCode === stockCode).reduce((sum, row) => sum + row.quantity, 0);
-      const journalQty = fgJournal.filter((row) => row.stockCode.trim() === stockCode).reduce((sum, row) => sum + row.journalQty, 0);
+      const apiRows = fgApi.filter((row) => row.stockCode === stockCode);
+      assert.ok(apiRows.every((row) => {
+        const source = sourceByGtr.get([row.stockCode.trim(), String(row.gtrReference || '').trim()].join('/'));
+        return source?.sourceWarehouseMin === 'B-WIP01' && source.sourceWarehouseMax === 'B-WIP01';
+      }), `${stockCode} API FG receipt is not independently linked to B-WIP01`);
+      const journalQty = verifiedFgJournal.filter((row) => row.stockCode.trim() === stockCode).reduce((sum, row) => sum + row.journalQty, 0);
       assert.equal(apiQty, journalQty);
-      return { stockCode, apiQty, journalQty, mapping: sheetMapping(stockCode, boms, true) };
+      return { stockCode, apiQty, journalQty, verifiedWipSourceReceiptCount: verifiedFgJournal.filter((row) => row.stockCode.trim() === stockCode).length,
+        mapping: sheetMapping(stockCode, boms, true) };
     });
     const mappingChecks = ['N1WB-E40726-DC', 'N1WB-E40726-CJ', 'N1WB-E40726-CJ-RAP', 'N1WZ-2640726-K', 'N1WZ-2640726-M'].map((code) => sheetMapping(code, boms, true));
     const night = payload.windows.find((window) => window.shift === 'night');
