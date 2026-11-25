@@ -11,8 +11,10 @@ const views = [
   { id: 'settings', label: 'Settings' },
 ];
 
-export default function OeeModuleShell({ planningWeeks, actuals, setActuals, settings, setSettings, productionLine, setProductionLine, editable, weekStart, currentUser, initialPlanningEntryId = null, oeeHistory, setOeeHistory }) {
-  const [view, setView] = useState('dashboard');
+export default function OeeModuleShell({ planningWeeks, actuals, setActuals, settings, setSettings, productionLine, setProductionLine, editable, weekStart, currentUser, initialPlanningEntryId = null, oeeHistory, setOeeHistory, view: controlledView, onViewChange }) {
+  const [localView, setLocalView] = useState('dashboard');
+  const view = controlledView ?? localView;
+  const setView = (next) => { setLocalView(next); onViewChange?.(next); };
   useEffect(() => { if (initialPlanningEntryId) setView('input'); }, [initialPlanningEntryId]);
 
   return (

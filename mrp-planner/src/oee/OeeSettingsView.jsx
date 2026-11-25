@@ -110,6 +110,7 @@ export default function OeeSettingsView({ settings, setSettings, productionLine,
       <section className="oee-panel">
         <h3>Cycle Times / NICT</h3>
         <p className="oee-caption">Master data placeholder. Workbook-driven NICT values can be added here later.</p>
+        <div className="planner-table-scroll" role="region" aria-label="Cycle time standards table" tabIndex={0}>
         <table className="mrp-table">
           <thead>
             <tr>
@@ -131,6 +132,7 @@ export default function OeeSettingsView({ settings, setSettings, productionLine,
             )}
           </tbody>
         </table>
+        </div>
       </section>
 
       <section className="oee-panel">

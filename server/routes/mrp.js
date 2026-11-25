@@ -2,6 +2,19 @@ const express = require("express");
 const router = express.Router();
 const postgres = require("../postgres");
 
+// Temporary containment, not authentication. Keep this before every route so
+// mutations (including future bulk/alternative paths) cannot acquire a database
+// connection. See docs/planning-write-restriction.md before replacing this gate.
+router.use((request, response, next) => {
+  if (["GET", "HEAD", "OPTIONS"].includes(request.method)) return next();
+
+  response.set("Cache-Control", "no-store");
+  return response.status(503).json({
+    success: false,
+    code: "PLANNING_WRITES_UNAVAILABLE",
+    error: "Planning writes are unavailable until server-side authentication and authorization are configured.",
+  });
+});
 
 const PLANNING_STATUSES = [
   "Planned",

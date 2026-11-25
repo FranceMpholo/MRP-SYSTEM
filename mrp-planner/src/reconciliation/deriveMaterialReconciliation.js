@@ -3,23 +3,24 @@ import { normalizeSysproTransaction, TRANSACTION_CLASSES as TC } from "./transac
 import { balanceForPeriod, isActualInPeriod, isInPeriod } from "./periodUtils.js";
 import { DEFAULT_TOLERANCE, evaluateTolerance } from "./tolerances.js";
 import { entryProductionLine, getThermoformingDisplayCode } from "../production/productionLines.js";
+import { inspectBom, normalizeStockCode, itemStockCode, bomFactor } from '../bom/bomValidation.js';
 
 const number = (value) => Number(value) || 0;
 const byStockCode = (rows = []) => new Map(rows.map((row) => [row.stockCode, row]));
 
 export function deriveMaterialReconciliation({
   productionActuals = [], items = [], boms = [], parentPairs = BLOW_MOULDING_PARENT_PAIRS,
-  sysproTransactions = [], openingWipBalances = [], closingWipBalances = [], tolerances = [], period,
+  sysproTransactions = [], openingWipBalances = [], closingWipBalances = [], tolerances = [], period, bomAvailable = true,
 }) {
   const empty = { summary: { materialsChecked: 0, tied: 0, consumptionVariances: 0, stockBalanceVariances: 0, pendingBkf: 0, dataIssues: 0 }, rows: [] };
   if (!period?.dateFrom || !period?.dateTo) return empty;
-  const itemsByCode = new Map(items.map((item) => [String(item.code || "").trim().toUpperCase(), item]));
-  const itemsById = new Map(items.map((item) => [item.id, item]));
-  const bomsByParent = new Map();
-  boms.forEach((bom) => { const key = String(bom.parentStockCode || "").trim().toUpperCase(); if (key) bomsByParent.set(key, [...(bomsByParent.get(key) || []), bom]); });
+  const itemsByCode = new Map(items.map((item) => [itemStockCode(item), item]));
+  const context = inspectBom(boms, items);
+  const bomsByParent = context.byParent;
   const pairsByCode = new Map(parentPairs.map((pair) => [pair.planningCode, pair]));
   const expectedByChild = new Map();
   let missingBom = false;
+  const dataIssues = bomAvailable ? [] : ['SYSPRO BOM is unavailable or refreshing; expected consumption is unknown.'];
 
   productionActuals.filter((actual) => number(actual.actualMouldQty) > 0 && isActualInPeriod(actual, period)).forEach((actual) => {
     const pair = entryProductionLine(actual) === "thermoforming" ? null : pairsByCode.get(actual.partNumber);
@@ -27,27 +28,32 @@ export function deriveMaterialReconciliation({
     parentCodes.forEach((parentStockCode) => {
       const normalizedParent = String(parentStockCode || "").trim().toUpperCase();
       const parentBoms = bomsByParent.get(normalizedParent);
-      if (!parentBoms?.length) { missingBom = true; return; }
+      if (!parentBoms?.length) { missingBom = true; dataIssues.push(`BOM missing for produced parent ${normalizedParent}; material requirements are unresolved.`); return; }
+      dataIssues.push(...context.issuesForParent(normalizedParent, { direct: true }).map((issue) => `${normalizedParent}: ${issue}`));
       parentBoms.forEach((bom) => {
         const childCode = String(bom.componentStockCode || "").trim().toUpperCase();
         const child = itemsByCode.get(childCode) || { id: childCode, code: childCode, description: bom.componentDescription || "No description", uom: "" };
-        const expectedQty = number(actual.actualMouldQty) * number(bom.qtyPer);
-        const current = expectedByChild.get(childCode) || { child, expectedConsumptionQty: 0, contributions: [] };
-        current.expectedConsumptionQty += expectedQty;
-        current.contributions.push({ actualRecordId: actual.id, planningEntryId: actual.planningEntryId || null, machine: actual.machine, day: actual.day, shift: actual.shift, displayCode: pair?.displayCode || (entryProductionLine(actual) === "thermoforming" ? getThermoformingDisplayCode(parentStockCode) : actual.partNumber), parentStockCode, actualMouldQty: number(actual.actualMouldQty), bomQtyPer: number(bom.qtyPer), expectedQty });
+        const factor = bomFactor(bom);
+        const incomplete = !bomAvailable || context.globalIssues.length > 0 || context.lineIssues.get(bom).length > 0
+          || (context.parentIssues.get(normalizedParent) || []).length > 0 || context.byParent.has(childCode);
+        const expectedQty = incomplete ? null : number(actual.actualMouldQty) * factor.value;
+        const current = expectedByChild.get(childCode) || { child, expectedConsumptionQty: 0, incomplete: false, contributions: [] };
+        current.incomplete ||= incomplete;
+        if (expectedQty !== null) current.expectedConsumptionQty += expectedQty;
+        current.contributions.push({ actualRecordId: actual.id, planningEntryId: actual.planningEntryId || null, machine: actual.machine, day: actual.day, shift: actual.shift, displayCode: pair?.displayCode || (entryProductionLine(actual) === "thermoforming" ? getThermoformingDisplayCode(parentStockCode) : actual.partNumber), parentStockCode, actualMouldQty: number(actual.actualMouldQty), bomQtyPer: factor.value, qtyPerState: factor.state, expectedQty });
         expectedByChild.set(childCode, current);
       });
     });
   });
 
-  const transactions = sysproTransactions.map((transaction) => normalizeSysproTransaction(transaction)).filter((transaction) => isInPeriod(transaction, period));
+  const transactions = sysproTransactions.map((transaction) => normalizeSysproTransaction(transaction)).map((transaction) => ({ ...transaction, stockCode: normalizeStockCode(transaction.stockCode) })).filter((transaction) => isInPeriod(transaction, period));
   const transactionsByCode = new Map();
   transactions.forEach((transaction) => transactionsByCode.set(transaction.stockCode, [...(transactionsByCode.get(transaction.stockCode) || []), transaction]));
   const toleranceByCode = byStockCode(tolerances);
-  const allCodes = new Set([...expectedByChild.values()].map(({ child }) => child.code));
+  const allCodes = new Set(expectedByChild.keys());
   transactions.forEach((transaction) => allCodes.add(transaction.stockCode));
-  openingWipBalances.forEach((balance) => allCodes.add(balance.stockCode));
-  closingWipBalances.forEach((balance) => allCodes.add(balance.stockCode));
+  openingWipBalances.forEach((balance) => allCodes.add(normalizeStockCode(balance.stockCode)));
+  closingWipBalances.forEach((balance) => allCodes.add(normalizeStockCode(balance.stockCode)));
 
   const rows = [...allCodes].filter(Boolean).map((stockCode) => {
     const item = itemsByCode.get(stockCode);
@@ -64,8 +70,8 @@ export function deriveMaterialReconciliation({
     const grossConsumption = consumption.reduce((sum, transaction) => sum + transaction.quantity, 0);
     const reversedConsumption = consumptionReversals.reduce((sum, transaction) => sum + transaction.quantity, 0);
     const systemConsumptionQty = grossConsumption - reversedConsumption;
-    const expectedConsumptionQty = number(expected?.expectedConsumptionQty);
-    const consumptionVarianceQty = systemConsumptionQty - expectedConsumptionQty;
+    const expectedConsumptionQty = !expected || expected.incomplete || missingBom || !bomAvailable ? null : expected.expectedConsumptionQty;
+    const consumptionVarianceQty = expectedConsumptionQty === null ? null : systemConsumptionQty - expectedConsumptionQty;
     const consumptionVariancePct = expectedConsumptionQty > 0 ? consumptionVarianceQty / expectedConsumptionQty * 100 : null;
     const openingWipQty = balanceForPeriod(openingWipBalances, stockCode, period.dateFrom, "opening");
     const actualClosingWipQty = balanceForPeriod(closingWipBalances, stockCode, period.dateTo, "closing");
@@ -83,7 +89,7 @@ export function deriveMaterialReconciliation({
     const consumptionEvaluation = evaluateTolerance({ varianceQty: consumptionVarianceQty, expectedQty: expectedConsumptionQty, tolerance: consumptionTolerance });
     const stockEvaluation = evaluateTolerance({ varianceQty: stockBalanceVarianceQty, expectedQty: expectedClosingWipQty, tolerance: stockBalanceTolerance });
     const missingRequiredSysproData = openingWipQty === null || actualClosingWipQty === null;
-    const dataIncomplete = !expected || missingBom || missingRequiredSysproData;
+    const dataIncomplete = expectedConsumptionQty === null || missingRequiredSysproData;
     const pending = matched.some((transaction) => transaction.knownPendingBackflush);
     let status = "Tied";
     if (dataIncomplete) status = "Data incomplete";
@@ -91,11 +97,11 @@ export function deriveMaterialReconciliation({
     else if (!consumptionEvaluation.withinTolerance) status = "Consumption variance";
     else if (!stockEvaluation.withinTolerance) status = "Stock balance variance";
 
-    return { childItemId: item?.id || null, stockCode, description: item?.description || "Item not found", uom: item?.uom || "", expectedConsumptionQty, systemConsumptionQty, consumptionVarianceQty, consumptionVariancePct, openingWipQty, incomingWipQty, outgoingWipQty, expectedClosingWipQty, actualClosingWipQty, stockBalanceVarianceQty, consumptionTolerance, stockBalanceTolerance, consumptionWithinTolerance: consumptionEvaluation.withinTolerance, stockBalanceWithinTolerance: stockEvaluation.withinTolerance, status, stockBalance: { openingWipQty, rawToWipQty: incomingWipQty, productionConsumptionQty: grossConsumption, scrapOutQty, regOutQty, reversalInQty, adjustmentQty, expectedClosingWipQty, actualClosingWipQty, stockBalanceVarianceQty }, drillDown: { actualContributions: expected?.contributions || [], parentBomContributions: expected?.contributions || [], sysproConsumptionTransactions: [...consumption, ...consumptionReversals], transferTransactions: transfers, scrapTransactions: scrap, regTransactions: reg, reversalTransactions: reversals, adjustmentTransactions: adjustments } };
+    return { childItemId: item?.id || null, stockCode, description: item?.description || expected?.child.description || "Item not found", uom: item?.uom || expected?.child.uom || "", expectedConsumptionQty, systemConsumptionQty, consumptionVarianceQty, consumptionVariancePct, openingWipQty, incomingWipQty, outgoingWipQty, expectedClosingWipQty, actualClosingWipQty, stockBalanceVarianceQty, consumptionTolerance, stockBalanceTolerance, consumptionWithinTolerance: consumptionEvaluation.withinTolerance, stockBalanceWithinTolerance: stockEvaluation.withinTolerance, status, stockBalance: { openingWipQty, rawToWipQty: incomingWipQty, productionConsumptionQty: grossConsumption, scrapOutQty, regOutQty, reversalInQty, adjustmentQty, expectedClosingWipQty, actualClosingWipQty, stockBalanceVarianceQty }, drillDown: { actualContributions: expected?.contributions || [], parentBomContributions: expected?.contributions || [], sysproConsumptionTransactions: [...consumption, ...consumptionReversals], transferTransactions: transfers, scrapTransactions: scrap, regTransactions: reg, reversalTransactions: reversals, adjustmentTransactions: adjustments } };
   }).sort((a, b) => a.stockCode.localeCompare(b.stockCode));
 
   const count = (status) => rows.filter((row) => row.status === status).length;
-  return { summary: { materialsChecked: rows.length, tied: count("Tied"), consumptionVariances: count("Consumption variance"), stockBalanceVariances: count("Stock balance variance"), pendingBkf: count("Pending BKF"), dataIssues: count("Data incomplete") }, rows };
+  return { summary: { materialsChecked: rows.length, tied: count("Tied"), consumptionVariances: count("Consumption variance"), stockBalanceVariances: count("Stock balance variance"), pendingBkf: count("Pending BKF"), dataIssues: count("Data incomplete") }, rows, dataIssues: [...new Set(dataIssues)] };
 }
 
 export default deriveMaterialReconciliation;

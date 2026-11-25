@@ -1,0 +1,491 @@
+/* Only the signed-in shell owns viewport scrolling. Login and load/error
+   screens keep their existing document layout. */
+#root:has(> .planner-app-shell) {
+  min-height: 0;
+}
+
+.planner-app-shell {
+  width: 100%;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.planner-layout {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.planner-sidebar {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.planner-sidebar-brand {
+  flex: none;
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid #3a4557;
+}
+
+.planner-sidebar-scroll {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  padding: 14px 12px 18px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overflow-wrap: anywhere;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scroll-padding-block: 12px;
+}
+
+.planner-content-column {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  overflow: visible;
+}
+
+.planner-toolbar {
+  position: relative;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 9px 14px;
+  border-bottom: 1px solid #e3dfd2;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 1px 3px rgba(27, 36, 48, 0.05);
+}
+
+.planner-toolbar-workspace {
+  display: flex;
+  flex-direction: column;
+  min-width: 130px;
+  line-height: 1.15;
+}
+
+.planner-toolbar-workspace span,
+.planner-account-summary span {
+  color: #746c5c;
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.planner-toolbar-workspace strong {
+  overflow: hidden;
+  color: #1b2430;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.planner-toolbar-status {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  color: #2f6f4e;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.planner-toolbar-status.is-error,
+.planner-toolbar-status.syspro-offline {
+  color: #a6362b;
+}
+
+.planner-toolbar-status.syspro-loading,
+.planner-toolbar-status.syspro-checking,
+.planner-toolbar-status.syspro-reconnecting {
+  color: #746c5c;
+}
+
+.planner-toolbar-status button {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.planner-spin {
+  animation: spin 1s linear infinite;
+}
+
+.planner-toolbar-menus {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+}
+
+.planner-utility {
+  position: relative;
+}
+
+.planner-utility-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 32px;
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: #2b3646;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.planner-utility-trigger:hover,
+.planner-utility-trigger[aria-expanded="true"] {
+  border-color: #c9c2ae;
+  background: #f6f4ee;
+}
+
+.planner-utility-trigger:focus-visible,
+.planner-utility-menu :is(button, select):focus-visible {
+  outline: 2px solid #0868b2;
+  outline-offset: 2px;
+}
+
+.planner-utility-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(310px, calc(100vw - 24px));
+  max-height: calc(100dvh - 76px);
+  padding: 14px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid #c9c2ae;
+  border-radius: 6px;
+  background: #fff;
+  color: #232323;
+  box-shadow: 0 12px 32px rgba(27, 36, 48, 0.18);
+}
+
+.planner-utility-menu label {
+  color: #1b2430;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.planner-utility-menu select {
+  width: 100%;
+  padding: 7px 8px;
+  border: 1px solid #c9c2ae;
+  border-radius: 4px;
+  background: #fff;
+  color: #232323;
+  font: inherit;
+}
+
+.planner-utility-menu > button,
+.planner-menu-error button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: #2b3646;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.planner-utility-menu > button:hover,
+.planner-menu-error button:hover {
+  background: #f6f4ee;
+}
+
+.planner-utility-menu > button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.planner-utility-menu p,
+.planner-connection-summary span {
+  margin: 0;
+  color: #746c5c;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.planner-connection-summary,
+.planner-account-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 2px 8px 8px;
+}
+
+.planner-menu-separator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 3px;
+  color: #746c5c;
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.planner-menu-separator::after {
+  height: 1px;
+  flex: 1;
+  background: #e3dfd2;
+  content: "";
+}
+
+.planner-utility-menu .planner-menu-danger {
+  color: #a6362b;
+}
+
+.planner-menu-error {
+  color: #a6362b !important;
+  overflow-wrap: anywhere;
+}
+
+.planner-main {
+  min-width: 0;
+  min-height: 0;
+  padding: 22px 26px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scroll-padding: 16px;
+}
+
+.planner-table-scroll {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+.planner-navigation-toggle {
+  display: none;
+}
+
+.planner-sidebar-scroll:focus-visible,
+.planner-main:focus-visible,
+.planner-table-scroll:focus-visible {
+  outline: 2px solid #0868b2;
+  outline-offset: -3px;
+}
+
+/* Let Cycle Count's table, rather than the entire page, own its wide columns. */
+.planner-main .cycle-count {
+  min-width: 0;
+}
+
+.planner-main .cc-table-wrap table {
+  min-width: 850px;
+}
+
+.planner-main .oee-settings fieldset {
+  min-width: 0;
+}
+
+.planner-main .oee-settings input,
+.planner-main .oee-settings select {
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* Existing dialogs still use viewport positioning. Give short windows an
+   internal dialog scroll area instead of putting form actions off screen. */
+.planner-app-shell .bm-editor {
+  max-height: calc(100vh - 36px);
+  max-height: calc(100dvh - 36px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.planner-app-shell .auth-modal,
+.planner-app-shell + .auth-modal {
+  padding: 16px;
+  overscroll-behavior: contain;
+}
+
+.planner-app-shell .auth-modal .auth-card,
+.planner-app-shell + .auth-modal .auth-card {
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+@media (max-width: 900px) {
+  .planner-toolbar {
+    flex-wrap: wrap;
+    gap: 6px 10px;
+  }
+
+  .planner-toolbar-menus {
+    width: 100%;
+    justify-content: flex-end;
+    margin-left: 0;
+  }
+}
+
+@media (max-width: 700px) {
+  .planner-layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .planner-sidebar {
+    max-height: 45vh;
+    max-height: 45dvh;
+  }
+
+  .planner-sidebar-brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+  }
+
+  .planner-sidebar-brand > div:first-child {
+    width: 76px !important;
+    height: 38px !important;
+    margin-bottom: 0 !important;
+  }
+
+  .planner-sidebar-brand img {
+    width: 74px !important;
+  }
+
+  .planner-navigation-toggle {
+    display: block;
+    flex: none;
+    margin: 8px 12px;
+    padding: 9px 12px;
+    border: 1px solid #8c93a0;
+    border-radius: 4px;
+    background: transparent;
+    color: #fff;
+    text-align: left;
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .planner-sidebar[data-mobile-open="false"] .planner-sidebar-scroll {
+    display: none;
+  }
+
+  .planner-main {
+    padding: 14px 12px;
+  }
+
+  .planner-toolbar {
+    flex-wrap: wrap;
+    gap: 6px 10px;
+    padding: 7px 10px;
+  }
+
+  .planner-toolbar-workspace {
+    min-width: 110px;
+    flex: 1;
+  }
+
+  .planner-toolbar-menus {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .planner-utility {
+    flex: 1;
+  }
+
+  .planner-utility-trigger {
+    justify-content: center;
+    width: 100%;
+  }
+
+  .planner-utility-menu {
+    position: fixed;
+    top: auto;
+    right: 12px;
+    left: 12px;
+    width: auto;
+  }
+
+  .planner-main .cc-header,
+  .planner-main .cc-mode,
+  .planner-main .cc-shifts {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .planner-main .oee-settings {
+    /* The General/Special Rules panel also declares its columns inline. */
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+}
+
+/* Restore normal document pagination, not a viewport-sized printed scrollbox.
+   No transforms/paint containment are used, so fixed dialogs retain their
+   viewport positioning and image/PDF export nodes retain their own sizing. */
+@media print {
+  .planner-app-shell {
+    height: auto;
+    overflow: visible;
+    border: 0 !important;
+  }
+
+  .planner-layout {
+    display: block;
+    height: auto;
+  }
+
+  .planner-sidebar {
+    display: none;
+  }
+
+  .planner-main {
+    overflow: visible;
+    padding: 0;
+  }
+
+  .planner-content-column {
+    display: block;
+    overflow: visible;
+  }
+
+  .planner-toolbar {
+    box-shadow: none;
+  }
+
+  .planner-main :is(.planner-table-scroll, .bm-scroll, .actual-board-scroll,
+    .actual-table-scroll, .cc-table-wrap, .oee-table-scroll, .sheet-analysis-table-wrap) {
+    max-height: none;
+    overflow: visible;
+  }
+}

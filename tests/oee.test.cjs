@@ -8,6 +8,7 @@ const actual = { id: 'a1', planningEntryId: 'p1', actualMouldQty: 90, oee: { run
 const filters = { startDate: '2026-09-07', endDate: '2026-09-07', machine: '', shift: '', product: '' };
 const close = (a, b) => assert.ok(Math.abs(a - b) < 1e-10, `${a} != ${b}`);
 const syntheticNictCases = require('./fixtures/oee-standard-nict-workbook.json');
+const workbookNictCases = require('./fixtures/oee-standard-nict-workbook-parity.json');
 
 test('Excel formulas, normal Internal OEE and exact zero fallback', async () => {
   const d = await derive;
@@ -289,6 +290,74 @@ test('synthetic STANDARD_NICT expectations use formula products without external
   }
 });
 
+test('STANDARD_NICT reproduces selected MainData and Baseline_Data workbook rows', async () => {
+  const d = await derive;
+
+  for (const scenario of workbookNictCases) {
+    const result = d.deriveOeeRun({
+      planningEntryId: `workbook-row-${scenario.workbookRow}`,
+      date: scenario.date,
+      productionLine: scenario.line,
+      machine: scenario.line,
+      shift: scenario.shift,
+      process: scenario.process,
+      variant: scenario.variant,
+      suffix: scenario.suffix,
+      plannedTimeMinutes: scenario.plannedTimeMinutes,
+      plannedBreakMinutes: scenario.plannedBreakMinutes,
+      totalDowntimeMinutes: scenario.totalDowntimeMinutes,
+      totalProduced: scenario.totalProduced,
+      goodParts: scenario.goodParts,
+      scrapParts: scenario.scrapParts,
+      noTubsNoStillagesMinutes: scenario.noTubsNoStillagesMinutes,
+      nictSource: scenario.baseline.usedNictSource,
+      settings: {
+        cycleTimes: [{
+          variant: scenario.variant,
+          suffix: scenario.suffix,
+          process: scenario.process,
+          active: true,
+          nictFormingSeconds: scenario.baseline.nictFormingSeconds,
+          nictRobotSeconds: scenario.baseline.nictRobotSeconds,
+          jpd: scenario.baseline.jpd,
+        }],
+        specialRules: { STANDARD_NICT: true, CE_AGGREGATED: false, THERMO_ASSEMBLY_LINKED: false },
+      },
+    });
+
+    assert.equal(result.strategy, 'STANDARD_NICT', `row ${scenario.workbookRow}`);
+    assert.equal(result.status, 'COMPLETE', `row ${scenario.workbookRow}`);
+    assert.deepEqual(result.issues, [], `row ${scenario.workbookRow}`);
+    assert.equal(result.nictSource, 'NICT_ROBOT', `row ${scenario.workbookRow}`);
+    close(result.nictSeconds, scenario.baseline.nictRobotSeconds);
+    close(result.runTimeMinutes, scenario.excel.runTimeMinutes);
+    close(result.revisedPlanQty, scenario.excel.revisedPlanQty);
+    close(result.targetQty, scenario.excel.targetQty);
+    close(result.availability, scenario.excel.availability);
+    close(result.performance, scenario.excel.performance);
+    close(result.productivity, scenario.excel.productivity);
+    close(result.quality, scenario.excel.quality);
+    close(result.internalOee, scenario.excel.internalOee);
+
+    const formulaExternalOee = scenario.excel.availability * scenario.excel.quality * scenario.excel.performance;
+    close(result.externalOee, formulaExternalOee);
+    if (scenario.excel.externalOeeIsFormulaBacked) {
+      close(result.externalOee, scenario.excel.externalOee);
+    } else {
+      assert.notEqual(result.externalOee, scenario.excel.externalOee, `row ${scenario.workbookRow} manual External OEE must not override the clean formula`);
+    }
+  }
+});
+
+test('workbook parity fixture covers Thermo, Robot, scrap, downtime, and zero-scrap STANDARD_NICT rows', () => {
+  assert.ok(workbookNictCases.some((row) => row.process === 'Thermo'));
+  assert.ok(workbookNictCases.some((row) => row.process === 'Robot'));
+  assert.ok(workbookNictCases.some((row) => row.scrapParts > 0));
+  assert.ok(workbookNictCases.some((row) => row.scrapParts === 0));
+  assert.ok(workbookNictCases.some((row) => row.totalDowntimeMinutes > 0));
+  assert.ok(workbookNictCases.every((row) => !/CE|Thermo Assembly/i.test(`${row.suffix} ${row.process}`)));
+});
+
 test('Excel-style OEE engine reports missing NICT and invalid scrap/time issues without zeroing out', async () => {
   const d = await derive;
   const missingNict = d.deriveOeeRun({
@@ -426,6 +495,21 @@ test('dashboard reporting derives true month-to-date and downtime by historical 
   assert.equal(mtd.plan, 3);
   const downtime = reporting.deriveDowntimeByCategory(rows);
   assert.deepEqual([...downtime].sort((a, b) => a.label.localeCompare(b.label)), [{ label: 'NO_TUBS_NO_STILLAGES', downtime: 4, count: 1 }, { label: 'Old Machine Fault', downtime: 20, count: 1 }, { label: 'Prior Month', downtime: 99, count: 1 }]);
+});
+
+test('dashboard reporting composes all filters, ideal benchmark, and null-safe sorting', async () => {
+  const reporting = await import('../mrp-planner/src/oee/dashboardReporting.js');
+  const rows = [
+    { planningEntryId: 'run-b', date: '2026-09-03', productionLine: 'blowMoulding', machine: 'BM01', shift: 'SHIFT 01', process: 'STANDARD_NICT', product: 'TEST-PARENT-001', stockCode: 'TEST-PARENT-001', suffix: 'AA', status: 'COMPLETE', externalOee: 0 },
+    { planningEntryId: 'run-a', date: '2026-09-02', productionLine: 'blowMoulding', machine: 'BM01', shift: 'SHIFT 01', process: 'STANDARD_NICT', product: 'TEST-PARENT-001', stockCode: 'TEST-PARENT-001', suffix: 'AA', status: 'COMPLETE', externalOee: 0.8 },
+    { planningEntryId: 'run-other', date: '2026-09-02', productionLine: 'thermoforming', machine: 'AR1', shift: 'SHIFT 02', process: 'STANDARD_NICT', product: 'TEST-PARENT-002', stockCode: 'TEST-PARENT-002', suffix: 'BB', status: 'INCOMPLETE', externalOee: null },
+  ];
+  const selected = reporting.filterDashboardRows(rows, { startDate: '2026-09-01', endDate: '2026-09-03', productionLine: 'blowMoulding', machine: 'BM01', shift: 'SHIFT 01', process: 'STANDARD_NICT', product: 'parent-001', suffix: 'AA', status: 'COMPLETE' });
+  assert.deepEqual(selected.map((row) => row.planningEntryId), ['run-b', 'run-a']);
+  assert.equal(reporting.summarizeOeeRows(selected).externalOee, 0.4);
+  assert.deepEqual(reporting.addIdealOeeBenchmark([{ label: '2026-09-02', count: 1 }], 0.82), [{ label: '2026-09-02', count: 1, idealOee: 0.82 }]);
+  assert.deepEqual(reporting.sortDashboardRows(rows, { key: 'externalOee', direction: 'asc' }).map((row) => row.planningEntryId), ['run-b', 'run-a', 'run-other']);
+  assert.deepEqual(reporting.sortDashboardRows(selected, { key: 'date', direction: 'desc' }).map((row) => row.planningEntryId), ['run-b', 'run-a']);
 });
 
 test('history snapshots finalize complete runs without duplicate saves and preserve captured values', async () => {

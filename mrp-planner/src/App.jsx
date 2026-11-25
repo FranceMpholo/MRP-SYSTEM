@@ -1,16 +1,22 @@
-import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } from "react";
+import { flushSync } from "react-dom";
 import {
   LayoutDashboard, Package, ListTree, PlayCircle,
   Plus, Trash2, AlertTriangle, CheckCircle2, Loader2, RotateCcw, ChevronRight,
-  CalendarRange, ClipboardList, ClipboardCheck, Users, LogOut, KeyRound
+  CalendarRange, ClipboardList, ClipboardCheck, Users, LogOut, KeyRound,
+  ChevronDown, Settings2, Database, UserCircle, Wifi, WifiOff
 } from "lucide-react";
 import PlannerDashboard from "./dashboard/PlannerDashboard";
+import ProductionOverview, { UnavailableProductionDashboard, UNSUPPORTED_AREAS } from "./dashboard/ProductionOverview";
+import SheetAnalysis from "./dashboard/SheetAnalysis";
 import ProductionMRP from "./production/ProductionMRP";
 import { deriveProductionMRP } from "./production/deriveProductionMRP";
 import BlowMouldingPlanningBoard from "./planning/BlowMouldingPlanningBoard";
 import ProductionActuals from "./actuals/ProductionActuals";
 import { addCalendarDays, mondayOf } from "./planning/planningBoardUtils";
 import { fetchSysproBom, fetchSysproInventory, mergeSysproInventory } from "./api/sysproApi";
+import { useSysproSource } from './api/useSysproSource.js';
+import { connectionLabel } from './api/sysproConnection.js';
 import { deriveMaterialReconciliation } from "./reconciliation/deriveMaterialReconciliation";
 import atdLogo from "./assets/atd-logo.png";
 import { authenticate, clearSession, initializeAuth, saveSession, saveUsers } from "./auth/authService";
@@ -18,6 +24,9 @@ import { can } from "./auth/permissions";
 import { ChangePassword, Login, UsersPage } from "./auth/AuthScreens";
 import { PRODUCTION_LINES, entryProductionLine } from "./production/productionLines";
 import SysproBomExplorer from "./bom/SysproBomExplorer";
+import { runMRP } from './bom/mrpEngine.js';
+import { adaptLedgerBoms } from './bom/ledgerBom.js';
+import { bomSourceReady } from './bom/bomValidation.js';
 import { applyPlanAdjustment } from "./planning/planQuantities";
 import CycleCount from "./cycleCount/CycleCount";
 import ProductionScrap from "./scrap/ProductionScrap";
@@ -25,6 +34,12 @@ import OeeModuleShell from "./oee/OeeModuleShell";
 import { defaultOeeSettings } from "./planning/shiftConfig";
 import { buildOeeSettingsFoundation } from "./oee/oeeSettings";
 import { DEFAULT_PLANNING_HORIZON, PLANNING_HORIZONS, normalizePlanningHorizon, horizonOrders } from "./planning/planningHorizon";
+import { PLANNER_SAVE_ERROR_MESSAGE, readPlannerStorage, writePlannerStorage } from "./planning/plannerStorage";
+import { createPlannerSaveLifecycle } from "./planning/plannerSaveLifecycle";
+import { applyReviewedExcelPlan, planningExcelCatalog, mergeExcelPlanResult } from "./planning/excelPlanReview";
+import { prepareExcelPlanReview, excelProfileId } from "./planning/excelImportProfile";
+import FCSDTracker from "./fcsd/FCSDTracker";
+import "./appLayout.css";
 
 /* --------------------------------------------------------------------- */
 /*  Local storage shim — replaces Claude.ai's window.storage sandbox API */
@@ -127,6 +142,7 @@ function daysBetween(a, b) {
   return Math.round((new Date(b) - new Date(a)) / 86400000);
 }
 function fmtNum(n) {
+  if (n === null || n === undefined || (typeof n === 'string' && !n.trim()) || !Number.isFinite(Number(n))) return '—';
   const r = Math.round((n + Number.EPSILON) * 100) / 100;
   return r.toLocaleString(undefined, { maximumFractionDigits: 2 });
 }
@@ -134,96 +150,6 @@ function fmtNum(n) {
 /* ---------------------------------------------------------------------- */
 /*  MRP engine                                                           */
 /* ---------------------------------------------------------------------- */
-function computeLLC(items, boms) {
-  const llc = {};
-  items.forEach((i) => (llc[i.id] = 0));
-  let changed = true;
-  let guard = 0;
-  while (changed && guard < items.length + 3) {
-    changed = false;
-    boms.forEach((b) => {
-      const cand = (llc[b.parentId] || 0) + 1;
-      if ((llc[b.componentId] || 0) < cand) {
-        llc[b.componentId] = cand;
-        changed = true;
-      }
-    });
-    guard++;
-  }
-  return llc;
-}
-
-function runMRP(items, boms, demands, openOrders, weeksCount, monday) {
-  const llc = computeLLC(items, boms);
-  const order = [...items].sort((a, b) => (llc[a.id] || 0) - (llc[b.id] || 0));
-  const dependentGR = {};
-  items.forEach((i) => (dependentGR[i.id] = new Array(weeksCount).fill(0)));
-
-  const bucketIndex = (dateStr) => {
-    const idx = Math.floor(daysBetween(monday, dateStr) / 7);
-    return Math.min(Math.max(idx, 0), weeksCount - 1);
-  };
-  const isPastDue = (dateStr) => daysBetween(monday, dateStr) < 0;
-
-  const results = {};
-
-  order.forEach((item) => {
-    const GR = new Array(weeksCount).fill(0);
-    let pastDueDemand = 0;
-    demands.filter((d) => d.itemId === item.id).forEach((d) => {
-      if (isPastDue(d.dueDate)) pastDueDemand += Number(d.qty) || 0;
-      GR[bucketIndex(d.dueDate)] += Number(d.qty) || 0;
-    });
-    for (let w = 0; w < weeksCount; w++) GR[w] += dependentGR[item.id][w];
-
-    const SR = new Array(weeksCount).fill(0);
-    openOrders.filter((o) => o.itemId === item.id).forEach((o) => {
-      SR[bucketIndex(o.dueDate)] += Number(o.qty) || 0;
-    });
-
-    const leadWeeks = Math.max(0, Math.ceil((Number(item.leadTimeDays) || 0) / 7));
-    const safety = Number(item.safetyStock) || 0;
-    const lot = Number(item.lotSize) || 0;
-
-    const POH = [];
-    const PORcpt = new Array(weeksCount).fill(0);
-    const PORel = new Array(weeksCount).fill(0);
-    let running = Number(item.onHand) || 0;
-    let pastDueRelease = 0;
-
-    for (let w = 0; w < weeksCount; w++) {
-      const avail = running + SR[w] - GR[w];
-      let rcpt = 0;
-      if (avail < safety) {
-        const need = safety - avail;
-        rcpt = lot > 0 ? Math.ceil(need / lot) * lot : need;
-      }
-      PORcpt[w] = rcpt;
-      running = avail + rcpt;
-      POH.push(running);
-
-      if (rcpt > 0) {
-        const relIdx = w - leadWeeks;
-        if (relIdx < 0) {
-          pastDueRelease += rcpt;
-          PORel[0] += rcpt;
-        } else {
-          PORel[relIdx] += rcpt;
-        }
-      }
-    }
-
-    results[item.id] = { GR, SR, POH, PORcpt, PORel, pastDueRelease, pastDueDemand, llc: llc[item.id] || 0 };
-
-    boms.filter((b) => b.parentId === item.id).forEach((b) => {
-      for (let w = 0; w < weeksCount; w++) {
-        if (PORel[w] > 0) dependentGR[b.componentId][w] += PORel[w] * (Number(b.qtyPer) || 0);
-      }
-    });
-  });
-
-  return results;
-}
 
 /* ---------------------------------------------------------------------- */
 /*  Blow Molding — live dataset (wired from Pack Size / Query1 / SS_BR-w.Plan) */
@@ -368,10 +294,27 @@ export default function MRPPlanner() {
 
 function MRPPlannerCore({ currentUser, users, onSaveUsers, onLogout, onChangePassword }) {
   const [tab, setTab] = useState("dashboard");
+  const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
+  const navigationToggle = useRef(null);
+  const mainContent = useRef(null);
+  const toolbar = useRef(null);
+  const utilityMenuTrigger = useRef(null);
+  const [utilityMenu, setUtilityMenu] = useState(null);
+  const [fcsdDirty, setFcsdDirty] = useState(false);
+  // An Excel review is session-only state, outside plannerData/autosave. Keeping it
+  // here preserves corrections while navigating to another workspace or tab.
+  const [planningExcelImport, setPlanningExcelImport] = useState(null);
+  const [planningImportProfiles, setPlanningImportProfiles] = useState({});
+  const previousWorkspaceTab = useRef("dashboard");
   const [oeeInputEntryId, setOeeInputEntryId] = useState(null);
+  const [oeeView, setOeeView] = useState("dashboard");
   const [items, setItems] = useState([]);
-  const [boms, setBoms] = useState([]);
-  const [bomStatus, setBomStatus] = useState({ connected: false, loading: false, lastUpdated: null, error: null });
+  const [loaded, setLoaded] = useState(false);
+  const [stockSource, refreshSysproStock] = useSysproSource(fetchSysproInventory, 'SYSPRO InvMaster / InvWarehouse', loaded);
+  const [bomSource, refreshSysproBom] = useSysproSource(fetchSysproBom, 'SYSPRO BomStructure', loaded);
+  const boms = bomSource.data;
+  const bomStatus = useMemo(() => ({ connected: bomSource.phase === 'connected', loading: ['checking', 'reconnecting'].includes(bomSource.phase),
+    lastUpdated: bomSource.lastUpdated, error: bomSource.error }), [bomSource]);
   const [demands, setDemands] = useState([]);
   const [openOrders, setOpenOrders] = useState([]);
   const [productionActuals, setProductionActuals] = useState([]);
@@ -382,27 +325,117 @@ function MRPPlannerCore({ currentUser, users, onSaveUsers, onLogout, onChangePas
   const [closingWipBalances, setClosingWipBalances] = useState([]);
   const [reconciliationTolerances, setReconciliationTolerances] = useState([]);
   const [cycleCountDays, setCycleCountDays] = useState([]);
-  const [sysproInventory, setSysproInventory] = useState([]);
-  const [sysproStatus, setSysproStatus] = useState("offline");
-  const [sysproLastUpdated, setSysproLastUpdated] = useState(null);
+  const sysproInventory = stockSource.data;
+  const sysproStatus = stockSource.phase;
+  const sysproLastUpdated = stockSource.lastUpdated;
   const initialWeek = mondayOf(new Date());
   const [activeWeekStart, setActiveWeekStart] = useState(initialWeek);
   const [planningWeeks, setPlanningWeeks] = useState({ [initialWeek]: { weekStart: initialWeek, entries: [] } });
   const [selectedProductionLine, setSelectedProductionLine] = useState("blowMoulding");
   const [horizon, setHorizon] = useState(DEFAULT_PLANNING_HORIZON);
-  const [loaded, setLoaded] = useState(false);
-  const [saveState, setSaveState] = useState("idle"); // idle | saving | saved
+  const [loadError, setLoadError] = useState(null);
+  const [loadRetryVersion, setLoadRetryVersion] = useState(0);
+  const [saveState, setSaveState] = useState("idle"); // idle | saving | saved | error
+  const [saveError, setSaveError] = useState(null);
+  const [saveRetryVersion, setSaveRetryVersion] = useState(0);
   const [ledgerItemId, setLedgerItemId] = useState(null);
   const [mrpRunVersion, setMrpRunVersion] = useState(0);
   const saveTimer = useRef(null);
+  const plannerSnapshot = useRef({ loaded: false, data: null });
+  const saveLifecycle = useRef(null);
+  const logoutInProgress = useRef(false);
+  const [loggingOut, setLoggingOut] = useState(false);
+  const [logoutError, setLogoutError] = useState(null);
 
-  // load
   useEffect(() => {
+    if (!planningExcelImport || planningExcelImport.stage === "imported") return undefined;
+    const warn = (event) => { event.preventDefault(); event.returnValue = "Your unimported Excel review has unsaved corrections."; };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [planningExcelImport]);
+
+  const handleFcsdDirtyChange = useCallback((value) => setFcsdDirty(value), []);
+  const closeUtilityMenu = useCallback((returnFocus = false) => {
+    setUtilityMenu(null);
+    if (returnFocus) utilityMenuTrigger.current?.focus();
+  }, []);
+  function toggleUtilityMenu(menu, trigger) {
+    if (utilityMenu === menu) {
+      closeUtilityMenu(true);
+      return;
+    }
+    utilityMenuTrigger.current = trigger;
+    setUtilityMenu(menu);
+  }
+  useEffect(() => {
+    if (!utilityMenu) return undefined;
+    function dismissMenu(event) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeUtilityMenu(true);
+      } else if (event.type === "pointerdown" && !toolbar.current?.contains(event.target)) {
+        closeUtilityMenu(false);
+      }
+    }
+    document.addEventListener("pointerdown", dismissMenu);
+    document.addEventListener("keydown", dismissMenu);
+    return () => {
+      document.removeEventListener("pointerdown", dismissMenu);
+      document.removeEventListener("keydown", dismissMenu);
+    };
+  }, [utilityMenu, closeUtilityMenu]);
+  function confirmLeaveFcsd(nextTab = null) {
+    if (nextTab === "fcsd" || tab !== "fcsd" || !fcsdDirty) return true;
+    return window.confirm("Leave FCSD Tracker? Your unsaved planning preview will be discarded.");
+  }
+  function navigateToTab(nextTab) {
+    if (!confirmLeaveFcsd(nextTab)) return false;
+    if (tab === "fcsd") setFcsdDirty(false);
+    if (nextTab === "fcsd" && tab !== "fcsd") previousWorkspaceTab.current = tab;
+    setTab(nextTab);
+    closeMobileNavigation();
+    return true;
+  }
+  function openProductionDashboard(productionLine) {
+    if (!Object.hasOwn(PRODUCTION_LINES, productionLine) || !navigateToTab("line-dashboard")) return;
+    setSelectedProductionLine(productionLine);
+  }
+  function openOverviewView(nextTab) {
+    if (nextTab === "oee") { setOeeView("dashboard"); setOeeInputEntryId(null); }
+    navigateToTab(nextTab);
+  }
+  useEffect(() => { if (mainContent.current) mainContent.current.scrollTop = 0; }, [tab]);
+  function closeMobileNavigation() {
+    setMobileNavigationOpen(false);
+    if (window.matchMedia("(max-width: 700px)").matches) mainContent.current?.focus({ preventScroll: true });
+  }
+  function selectWorkspace(value) {
+    if (value === "fcsd") {
+      if (tab !== "fcsd") previousWorkspaceTab.current = tab;
+      setTab("fcsd");
+      closeMobileNavigation();
+      return;
+    }
+    if (!Object.hasOwn(PRODUCTION_LINES, value)) return;
+    if (!confirmLeaveFcsd()) return;
+    const wasInFcsd = tab === "fcsd";
+    if (wasInFcsd) setFcsdDirty(false);
+    setSelectedProductionLine(value);
+    if (wasInFcsd) setTab(previousWorkspaceTab.current || "dashboard");
+    closeMobileNavigation();
+  }
+
+  // Load saved state before enabling the planner or automatic persistence.
+  useEffect(() => {
+    let cancelled = false;
     (async () => {
       try {
-        const res = await window.storage.get("mrp-data", false);
-        if (res && res.value) {
-          const parsed = JSON.parse(res.value);
+        setLoadError(null);
+        const result = await readPlannerStorage(window.storage, "mrp-data");
+        if (cancelled) return;
+        if (result.status === "saved") {
+          const parsed = result.data;
+          setPlanningImportProfiles(parsed.planningImportProfiles || {});
           setItems((parsed.items || []).map(withProductionFields));
           setDemands(parsed.demands || []);
           setOpenOrders(parsed.openOrders || []);
@@ -426,47 +459,86 @@ function MRPPlannerCore({ currentUser, users, onSaveUsers, onLogout, onChangePas
           setPlanningWeeks(storedWeeks);
           setActiveWeekStart(parsed.activeWeekStart || legacyPlanning.weekStart);
           setHorizon(normalizePlanningHorizon(parsed.horizon));
-          setSelectedProductionLine(parsed.selectedProductionLine || "blowMoulding");
+          setSelectedProductionLine(Object.hasOwn(PRODUCTION_LINES, parsed.selectedProductionLine) ? parsed.selectedProductionLine : "blowMoulding");
         } else {
+          setPlanningImportProfiles({});
           const seed = loadBlowMoldingData();
           setItems(seed.items);
           setDemands(seed.demands);
           setOpenOrders(seed.openOrders);
+          setProductionActuals([]);
+          setOeeHistory([]);
+          setOeeSettings(defaultOeeSettings());
+          setSysproTransactions([]);
+          setOpeningWipBalances([]);
+          setClosingWipBalances([]);
+          setReconciliationTolerances([]);
+          setCycleCountDays([]);
           const plan = buildDefaultPlanningWeek();
           setPlanningWeeks({ [plan.weekStart]: plan });
           setActiveWeekStart(plan.weekStart);
+          setSelectedProductionLine("blowMoulding");
+          setHorizon(DEFAULT_PLANNING_HORIZON);
         }
-      } catch (e) {
-        const seed = seedData();
-        setItems(seed.items);
-        setDemands(seed.demands);
-        setOpenOrders(seed.openOrders);
+        setLoaded(true);
+      } catch {
+        if (cancelled) return;
+        setLoaded(false);
+        setLoadError("Saved planning data could not be loaded. The stored value has been left untouched. Retry to try loading it again.");
       }
-      setLoaded(true);
     })();
-  }, []);
-
-  // save (debounced)
-  useEffect(() => {
-    if (!loaded) return;
-    setSaveState("saving");
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(async () => {
-      try {
-        await window.storage.set(
-          "mrp-data",
-          JSON.stringify({ items, demands, openOrders, planning, planningWeeks, activeWeekStart, selectedProductionLine, horizon, productionActuals, oeeHistory, oeeSettings, cycleCountDays, sysproTransactions, openingWipBalances, closingWipBalances, reconciliationTolerances }),
-          false
-        );
-        setSaveState("saved");
-      } catch (e) {
-        setSaveState("idle");
-      }
-    }, 600);
-    return () => clearTimeout(saveTimer.current);
-  }, [items, demands, openOrders, planningWeeks, activeWeekStart, selectedProductionLine, horizon, productionActuals, oeeHistory, oeeSettings, cycleCountDays, sysproTransactions, openingWipBalances, closingWipBalances, reconciliationTolerances, loaded]);
+    return () => { cancelled = true; };
+  }, [loadRetryVersion]);
 
   const planning = useMemo(() => { const source = planningWeeks[activeWeekStart] || { weekStart: activeWeekStart, entries: [] }; return { ...source, entries: (source.entries || []).filter((entry) => entryProductionLine(entry) === selectedProductionLine) }; }, [planningWeeks, activeWeekStart, selectedProductionLine]);
+  const plannerData = useMemo(() => ({ items, demands, openOrders, planning, planningWeeks, planningImportProfiles, activeWeekStart, selectedProductionLine, horizon, productionActuals, oeeHistory, oeeSettings, cycleCountDays, sysproTransactions, openingWipBalances, closingWipBalances, reconciliationTolerances }), [items, demands, openOrders, planning, planningWeeks, planningImportProfiles, activeWeekStart, selectedProductionLine, horizon, productionActuals, oeeHistory, oeeSettings, cycleCountDays, sysproTransactions, openingWipBalances, closingWipBalances, reconciliationTolerances]);
+  useLayoutEffect(() => {
+    plannerSnapshot.current = { loaded, data: plannerData };
+  }, [loaded, plannerData]);
+  if (!saveLifecycle.current) {
+    saveLifecycle.current = createPlannerSaveLifecycle({
+      getSnapshot: () => plannerSnapshot.current,
+      write: (data) => writePlannerStorage(window.storage, "mrp-data", data),
+      onSaveState: (state) => {
+        setSaveState(state);
+        setSaveError(state === "error" ? PLANNER_SAVE_ERROR_MESSAGE : null);
+      },
+    });
+  }
+
+  // Autosave and logout share one writer so an older asynchronous save cannot
+  // finish after the snapshot that logout needs to persist.
+  useEffect(() => {
+    if (!loaded || logoutInProgress.current) return;
+    setSaveState("saving");
+    setSaveError(null);
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => {
+      saveTimer.current = null;
+      saveLifecycle.current.saveLatest().catch(() => {}); // Error state is set by the shared writer.
+    }, 600);
+    return () => clearTimeout(saveTimer.current);
+  }, [plannerData, loaded, saveRetryVersion]);
+
+  async function requestLogout() {
+    if (logoutInProgress.current) return;
+    if (planningExcelImport && planningExcelImport.stage !== "imported" && !window.confirm("Discard the unimported Excel review and log out? Confirmed planning entries remain in the normal planner save path.")) return;
+    logoutInProgress.current = true;
+    // Commit an immediately preceding edit before reading the snapshot. This
+    // also flushes its autosave effect; cancel that timer before saving here.
+    flushSync(() => { setLoggingOut(true); setLogoutError(null); });
+    clearTimeout(saveTimer.current);
+    saveTimer.current = null;
+    try {
+      await saveLifecycle.current.saveLatest();
+      onLogout();
+    } catch {
+      logoutInProgress.current = false;
+      setLoggingOut(false);
+      setLogoutError("Logout was stopped. You are still signed in and your current work is on this screen. Retry logout to finish saving and sign out.");
+    }
+  }
+
   const setPlanning = useCallback((value) => {
     setPlanningWeeks((weeksByStart) => {
       const full = weeksByStart[activeWeekStart] || { weekStart: activeWeekStart, entries: [] };
@@ -484,6 +556,41 @@ function MRPPlannerCore({ currentUser, users, onSaveUsers, onLogout, onChangePas
     setActiveWeekStart(weekStart);
   }, []);
 
+  const importPlanningExcel = useCallback(async (payload) => {
+    if (!can(currentUser, "planning", "edit")) throw new Error("You do not have permission to import production plans.");
+    clearTimeout(saveTimer.current);
+    saveTimer.current = null;
+    try {
+      return await saveLifecycle.current.savePrepared({
+        prepare: (data) => {
+          const id = excelProfileId(payload.document), catalog = planningExcelCatalog(items, boms);
+          if (JSON.stringify(data.planningImportProfiles?.[id] || null) !== payload.profileBaseKey) throw new Error("The saved import profile changed. Re-upload to use its latest approvals.");
+          const bomConnected = Boolean(bomStatus.connected && !bomStatus.loading && !bomStatus.error);
+          const prepared = prepareExcelPlanReview({ ...payload, catalog, planningWeeks: data.planningWeeks, bomConnected });
+          if (!prepared.canImport || prepared.key !== payload.expectedReviewKey) throw new Error("Planning, source evidence or mappings changed. Review the updated preview before confirming.");
+          const savedProfile = data.planningImportProfiles?.[id];
+          const approvedProfile = JSON.stringify(savedProfile) === JSON.stringify(prepared.profile) ? savedProfile
+            : { ...prepared.profile, revision: (savedProfile?.revision || 0) + 1, approvedBy: currentUser.id, approvedAt: new Date().toISOString() };
+          const result = applyReviewedExcelPlan({ ...payload, draft: prepared.draft, expectedReviewKey: prepared.review.key, planningWeeks: data.planningWeeks, catalog,
+            bomConnected, userId: currentUser.id, profileEvidence: approvedProfile });
+          const nextProfiles = { ...(data.planningImportProfiles || {}), [id]: approvedProfile };
+          const first = result.added.find((entry) => entry.productionLine === data.selectedProductionLine) || result.added[0];
+          const active = first?.weekStart || data.activeWeekStart;
+          const week = result.planningWeeks[active] || { weekStart: active, entries: [] };
+          return { result, active, nextProfiles, data: { ...data, planningImportProfiles: nextProfiles, planningWeeks: result.planningWeeks, activeWeekStart: active,
+            planning: { ...week, entries: week.entries.filter((entry) => entryProductionLine(entry) === data.selectedProductionLine) } } };
+        },
+        commit: ({ result, active, nextProfiles }) => flushSync(() => {
+          setPlanningImportProfiles((current) => ({ ...current, [excelProfileId(payload.document)]: nextProfiles[excelProfileId(payload.document)] }));
+          setPlanningWeeks((current) => mergeExcelPlanResult(current, result));
+          setActiveWeekStart(active);
+        }),
+      });
+    } catch (error) {
+      throw new Error(`${error.message || "Import could not be saved."} No import entries were added to this screen. Your Excel preview is retained for correction or retry.`);
+    }
+  }, [items, boms, bomStatus, currentUser]);
+
   const adjustPlanningEntry = useCallback((planningEntryId, adjustment) => {
     if (!can(currentUser, "planAdjustments", "edit")) throw new Error("You do not have permission to adjust production plans.");
     setPlanningWeeks((weeksByStart) => {
@@ -498,30 +605,14 @@ function MRPPlannerCore({ currentUser, users, onSaveUsers, onLogout, onChangePas
     });
   }, [currentUser]);
 
-  const refreshSysproStock = useCallback(async () => {
-    setSysproStatus("loading");
-    try {
-      const inventory = await fetchSysproInventory();
-      setSysproInventory(inventory.data);
-      setSysproStatus("connected");
-      setSysproLastUpdated(new Date());
-    } catch (error) {
-      setSysproStatus("offline");
-    }
-  }, []);
-
-  const refreshSysproBom = useCallback(async () => { setBomStatus((status) => ({ ...status, loading: true, error: null })); try { const result = await fetchSysproBom(); setBoms(result.data); setBomStatus({ connected: true, loading: false, lastUpdated: new Date(), error: null }); } catch (error) { setBomStatus((status) => ({ ...status, connected: false, loading: false, error: error.message })); } }, []);
-
-  useEffect(() => { if (loaded) { refreshSysproStock(); refreshSysproBom(); } }, [loaded, refreshSysproStock, refreshSysproBom]);
-
   const itemsWithLiveStock = useMemo(
-    () => sysproStatus === "connected" ? mergeSysproInventory(items, sysproInventory) : items,
-    [items, sysproInventory, sysproStatus]
+    () => mergeSysproInventory(items, sysproStatus === 'connected' ? sysproInventory : [], boms.flatMap((bom) => [bom.parentStockCode, bom.componentStockCode])),
+    [items, sysproInventory, boms, sysproStatus]
   );
 
   const productionMrp = useMemo(
-    () => deriveProductionMRP({ planning, items: itemsWithLiveStock, boms }),
-    [planning, itemsWithLiveStock, boms]
+    () => deriveProductionMRP({ planning, items: itemsWithLiveStock, boms, bomAvailable: bomSourceReady(bomStatus), inventoryAvailable: sysproStatus === 'connected' }),
+    [planning, itemsWithLiveStock, boms, bomStatus, sysproStatus]
   );
   const activeActualsForReconciliation = useMemo(() => {
     const entriesById = new Map((planning.entries || []).map((entry) => [entry.id, entry]));
@@ -531,16 +622,20 @@ function MRPPlannerCore({ currentUser, users, onSaveUsers, onLogout, onChangePas
     });
   }, [productionActuals, planning.entries]);
   const reconciliationPeriod = useMemo(() => ({ day: planning.weekStart, dateFrom: `${planning.weekStart}T00:00:00`, dateTo: `${addCalendarDays(planning.weekStart, 7)}T00:00:00` }), [planning.weekStart]);
-  const materialReconciliation = useMemo(() => deriveMaterialReconciliation({ productionActuals: activeActualsForReconciliation, items, boms, sysproTransactions, openingWipBalances, closingWipBalances, tolerances: reconciliationTolerances, period: reconciliationPeriod }), [activeActualsForReconciliation, items, boms, sysproTransactions, openingWipBalances, closingWipBalances, reconciliationTolerances, reconciliationPeriod]);
+  const materialReconciliation = useMemo(() => deriveMaterialReconciliation({ productionActuals: activeActualsForReconciliation, items: itemsWithLiveStock, boms, sysproTransactions, openingWipBalances, closingWipBalances, tolerances: reconciliationTolerances, period: reconciliationPeriod, bomAvailable: bomSourceReady(bomStatus) }), [activeActualsForReconciliation, itemsWithLiveStock, boms, sysproTransactions, openingWipBalances, closingWipBalances, reconciliationTolerances, reconciliationPeriod, bomStatus]);
   const reconciliationAvailable = sysproTransactions.length > 0 && openingWipBalances.length > 0 && closingWipBalances.length > 0;
+  const allThermoPlanningEntries = useMemo(
+    () => Object.values(planningWeeks).flatMap((week) => week.entries || []).filter((entry) => entryProductionLine(entry) === "thermoforming"),
+    [planningWeeks]
+  );
 
   const monday = useMemo(() => new Date(`${activeWeekStart}T00:00:00`), [activeWeekStart]);
   const weeks = useMemo(
     () => Array.from({ length: horizon }, (_, i) => addDays(monday, i * 7)),
     [horizon, monday]
   );
-  const mrpCompatibleBoms = useMemo(() => { const ids = new Map(items.map((item) => [String(item.code || "").trim().toUpperCase(), item.id])); return boms.map((bom, index) => ({ id: `syspro_${index}`, parentId: ids.get(String(bom.parentStockCode || "").trim().toUpperCase()), componentId: ids.get(String(bom.componentStockCode || "").trim().toUpperCase()), qtyPer: bom.qtyPer })).filter((bom) => bom.parentId && bom.componentId); }, [items, boms]);
-  const mrp = useMemo(() => runMRP(items, mrpCompatibleBoms, horizonOrders(demands, activeWeekStart, horizon), horizonOrders(openOrders, activeWeekStart, horizon), horizon, monday), [items, mrpCompatibleBoms, demands, openOrders, horizon, monday, activeWeekStart, mrpRunVersion]);
+  const mrpCompatibleBoms = useMemo(() => adaptLedgerBoms(itemsWithLiveStock, boms), [itemsWithLiveStock, boms]);
+  const mrp = useMemo(() => runMRP(itemsWithLiveStock, mrpCompatibleBoms, horizonOrders(demands, activeWeekStart, horizon), horizonOrders(openOrders, activeWeekStart, horizon), horizon, monday, bomSourceReady(bomStatus), sysproStatus === 'connected'), [itemsWithLiveStock, mrpCompatibleBoms, demands, openOrders, horizon, monday, activeWeekStart, mrpRunVersion, bomStatus, sysproStatus]);
 
   const itemById = useCallback((id) => items.find((i) => i.id === id), [items]);
 
@@ -555,6 +650,7 @@ function MRPPlannerCore({ currentUser, users, onSaveUsers, onLogout, onChangePas
   }, [items, mrp]);
 
   function resetDemo() {
+    if (!window.confirm("Replace the current planning dataset with the generic demo dataset? Saved planning data will be replaced by the demo on the next save.")) return;
     const seed = seedData();
     setItems(seed.items);
     setDemands(seed.demands);
@@ -562,6 +658,7 @@ function MRPPlannerCore({ currentUser, users, onSaveUsers, onLogout, onChangePas
   }
 
   function resetBlowMolding() {
+    if (!window.confirm("Replace the current planning dataset with the Blow Molding dataset? Saved planning data will be replaced on the next save.")) return;
     const seed = loadBlowMoldingData();
     setItems(seed.items);
     setDemands(seed.demands);
@@ -570,9 +667,20 @@ function MRPPlannerCore({ currentUser, users, onSaveUsers, onLogout, onChangePas
 
   if (!loaded) {
     return (
-      <div className="plex-sans" style={{ display: "flex", alignItems: "center", justifyContent: "center", height: 400, color: T.muted }}>
-        <Loader2 size={18} style={{ marginRight: 8, animation: "spin 1s linear infinite" }} />
-        Loading planning data…
+      <div className="plex-sans" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", color: T.muted }}>
+        {loadError ? (
+          <section role="alert" style={{ maxWidth: 520, padding: 24, background: T.card, border: `1px solid ${T.line}`, borderRadius: 6, textAlign: "center" }}>
+            <h1 style={{ margin: "0 0 10px", color: T.ink, fontSize: 20 }}>Planning data unavailable</h1>
+            <p style={{ margin: "0 0 18px", lineHeight: 1.5 }}>{loadError}</p>
+            <button className="mrp-btn mrp-btn-primary" onClick={() => { setLoadError(null); setLoadRetryVersion((version) => version + 1); }}>
+              <RotateCcw size={14} /> Retry loading
+            </button>
+          </section>
+        ) : (
+          <><Loader2 size={18} style={{ marginRight: 8, animation: "spin 1s linear infinite" }} />Loading planning data…</>
+        )}
+        <button type="button" className="mrp-btn mrp-btn-ghost" disabled={loggingOut} onClick={requestLogout} style={{ marginLeft: 12 }}>{loggingOut ? "Logging out…" : "Logout"}</button>
+        {logoutError && <p role="alert">{logoutError}</p>}
       </div>
     );
   }
@@ -580,6 +688,7 @@ function MRPPlannerCore({ currentUser, users, onSaveUsers, onLogout, onChangePas
   const navItems = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, permission: "dashboard" },
     { id: "planning", label: "Planning", icon: CalendarRange, permission: "planning" },
+    { id: "fcsd", label: "FCSD Tracker", icon: ClipboardCheck, permission: "dashboard" },
     { id: "production-mrp", label: "Production MRP", icon: ClipboardList, permission: "productionMrp" },
     { id: "actuals", label: "Production Actuals", icon: CheckCircle2, permission: "actuals" },
     { id: "cycle-count", label: "Cycle Count", icon: ClipboardCheck, permission: "cycleCount" },
@@ -590,15 +699,29 @@ function MRPPlannerCore({ currentUser, users, onSaveUsers, onLogout, onChangePas
     { id: "ledger", label: "Planning Ledger", icon: PlayCircle, permission: "ledger" },
     { id: "users", label: "Users", icon: Users, permission: "users" },
   ].filter((item) => can(currentUser, item.permission));
-  const activeNav = navItems.find((item) => item.id === tab);
+  const isDepartmentDashboard = tab === "line-dashboard" || Object.hasOwn(UNSUPPORTED_AREAS, tab);
+  const activeNav = navItems.find((item) => item.id === tab) || (isDepartmentDashboard ? navItems.find((item) => item.id === "dashboard") : null);
+  const workspaceLabel = tab === "dashboard" ? "Production Overview" : tab === "fcsd" ? "FCSD Tracker" : UNSUPPORTED_AREAS[tab]?.name || (PRODUCTION_LINES[selectedProductionLine]?.name || selectedProductionLine);
+  const saveStatusLabel = saveState === "saving" ? "Saving…" : saveState === "saved" ? "Saved" : saveState === "error" ? "Save failed" : "Not saved yet";
+  const sysproStatusLabel = connectionLabel(sysproStatus);
+  const stockChecking = ['checking', 'reconnecting'].includes(sysproStatus);
+  const stockSnapshotLabel = sysproLastUpdated
+    ? `${sysproStatus === 'connected' ? 'Last refreshed' : 'Stale snapshot'} ${sysproLastUpdated.toLocaleString()} · ${stockSource.source}`
+    : 'No verified SYSPRO snapshot; stock calculations are incomplete.';
 
   return (
-    <div className="plex-sans" style={{ width: "100%", minHeight: "100vh", background: T.paper, color: T.text, overflow: "hidden", border: `1px solid ${T.line}` }}>
+    <div className="plex-sans planner-app-shell" aria-busy={loggingOut} inert={loggingOut ? "" : undefined} style={{ background: T.paper, color: T.text, border: `1px solid ${T.line}` }}>
       {FONTS}
-      <div style={{ display: "flex", width: "100%", minHeight: "100vh" }}>
+      <div className="planner-layout">
         {/* Sidebar */}
-        <div style={{ flex: "0 0 200px", background: T.ink, color: T.sidebarText, padding: "18px 12px" }}>
-          <div style={{ padding: "0 8px 18px 8px" }}>
+        <aside className="planner-sidebar" aria-label="Application navigation" data-mobile-open={mobileNavigationOpen} style={{ background: T.ink, color: T.sidebarText }} onKeyDown={(event) => {
+          if (event.key === "Escape" && window.matchMedia("(max-width: 700px)").matches) {
+            setMobileNavigationOpen(false);
+            navigationToggle.current?.focus();
+          }
+        }}>
+          <button ref={navigationToggle} className="planner-navigation-toggle" type="button" aria-expanded={mobileNavigationOpen} aria-controls="planner-navigation" onClick={() => setMobileNavigationOpen((open) => !open)}>{mobileNavigationOpen ? "Close navigation" : "Open navigation"}</button>
+          <div className="planner-sidebar-brand">
             <div style={{
               width: 120,
               height: 60,
@@ -615,14 +738,15 @@ function MRPPlannerCore({ currentUser, users, onSaveUsers, onLogout, onChangePas
             <div style={{ fontSize: 15, fontWeight: 600, color: "#fff", letterSpacing: ".01em" }}>Planning Desk</div>
             <div style={{ fontSize: 11, color: T.sidebarTextDim, marginTop: 2 }}>Production</div>
           </div>
+          <div id="planner-navigation" className="planner-sidebar-scroll" role="region" aria-label="Navigation and workspace" tabIndex={0}>
           <nav style={{ display: "flex", flexDirection: "column", gap: 2 }}>
             {navItems.map((n) => {
               const Icon = n.icon;
-              const active = tab === n.id;
+              const active = tab === n.id || (n.id === "dashboard" && isDepartmentDashboard);
               return (
+                <React.Fragment key={n.id}>
                 <button
-                  key={n.id}
-                  onClick={() => setTab(n.id)}
+                  onClick={() => { navigateToTab(n.id); if (n.id === "oee") { setOeeView("dashboard"); setOeeInputEntryId(null); } }}
                   style={{
                     display: "flex",
                     alignItems: "center",
@@ -646,70 +770,72 @@ function MRPPlannerCore({ currentUser, users, onSaveUsers, onLogout, onChangePas
                     </span>
                   )}
                 </button>
+                </React.Fragment>
               );
             })}
           </nav>
 
-          <div style={{ marginTop: 20, padding: "0 8px" }}><div style={{ fontSize: 11, color: T.sidebarTextDim, marginBottom: 6 }}>PRODUCTION LINE</div><select value={selectedProductionLine} onChange={(e) => setSelectedProductionLine(e.target.value)} style={{ width: "100%", background: T.inkSoft, color: "#fff", border: "1px solid #3A4557", borderRadius: 3, padding: "6px" }}>{Object.values(PRODUCTION_LINES).map((line) => <option key={line.id} value={line.id}>{line.name}</option>)}</select></div>
-
-          <div style={{ marginTop: 24, padding: "0 8px" }}>
-            <div style={{ fontSize: 11, color: T.sidebarTextDim, marginBottom: 6 }}>PLANNING HORIZON</div>
-            <select
-              value={horizon}
-              onChange={(e) => setHorizon(normalizePlanningHorizon(e.target.value))}
-              style={{ width: "100%", background: T.inkSoft, color: "#fff", border: `1px solid #3A4557`, borderRadius: 3, padding: "5px 6px", fontSize: 12 }}
-            >
-              {PLANNING_HORIZONS.map(value => <option key={value} value={value}>{value} {value === 1 ? 'week' : 'weeks'}</option>)}
-            </select>
-            <div style={{ color: T.sidebarTextDim, fontSize: 10, marginTop: 6 }}>Ledger analysis from the selected week. Planning, Dashboard and Production MRP show the active week.</div>
+          <div style={{ marginTop: 20, padding: "0 8px" }}><div style={{ fontSize: 11, color: T.sidebarTextDim, marginBottom: 6 }}>WORKSPACE</div><select aria-label="Workspace" value={tab === "fcsd" ? "fcsd" : selectedProductionLine} onChange={(e) => selectWorkspace(e.target.value)} style={{ width: "100%", background: T.inkSoft, color: "#fff", border: "1px solid #3A4557", borderRadius: 3, padding: "6px" }}>{Object.values(PRODUCTION_LINES).map((line) => <option key={line.id} value={line.id}>{line.name}</option>)}<option value="fcsd">FCSD Tracker</option></select></div>
           </div>
-
-          <div style={{ marginTop: 20, display: "flex", flexDirection: "column", gap: 8, padding: "0 8px" }}>
-            <button
-              onClick={resetBlowMolding}
-              className="plex-sans"
-              style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: "none", color: T.sidebarText, fontSize: 11, cursor: "pointer", padding: 0, textAlign: "left" }}
-            >
-              <RotateCcw size={12} /> Reload Blow Molding data
-            </button>
-            <button
-              onClick={resetDemo}
-              className="plex-sans"
-              style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: "none", color: T.sidebarTextDim, fontSize: 11, cursor: "pointer", padding: 0, textAlign: "left" }}
-            >
-              <RotateCcw size={12} /> Load generic demo instead
-            </button>
-          </div>
-
-          <div style={{ marginTop: 16, padding: "0 8px", fontSize: 11, color: T.sidebarTextDim, display: "flex", alignItems: "center", gap: 5 }}>
-            {saveState === "saving" ? (
-              <>
-                <Loader2 size={11} style={{ animation: "spin 1s linear infinite" }} /> Saving…
-              </>
-            ) : (
-              <>
-                <CheckCircle2 size={11} /> Saved
-              </>
-            )}
-          </div>
-          <div style={{ marginTop: 13, padding: "9px 8px", borderTop: "1px solid #3A4557", fontSize: 11 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 6, color: sysproStatus === "connected" ? "#9DD6B8" : sysproStatus === "loading" ? T.sidebarText : "#E7A8A2" }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: "currentColor" }} />Syspro: {sysproStatus === "connected" ? "Connected" : sysproStatus === "loading" ? "Connecting…" : "Offline"}</div>
-            <div style={{ color: T.sidebarTextDim, fontSize: 9, marginTop: 4 }}>{sysproLastUpdated ? `Updated ${sysproLastUpdated.toLocaleTimeString()}` : "Using local stock fallback"}</div>
-            <button onClick={refreshSysproStock} disabled={sysproStatus === "loading"} style={{ border: 0, background: "transparent", color: T.sidebarText, padding: "6px 0 0", fontSize: 10, cursor: "pointer" }}><RotateCcw size={10} style={{ verticalAlign: -1, marginRight: 4 }} />Refresh Syspro Stock</button>
-          </div>
-          <div style={{ marginTop: 13, padding: "12px 8px", borderTop: "1px solid #3A4557", fontSize: 11 }}>
-            <div style={{ color: "#fff", fontWeight: 600 }}>{currentUser.fullName}</div><div style={{ color: T.sidebarTextDim, marginTop: 2 }}>{currentUser.role}</div>
-            <button onClick={onChangePassword} style={{ display: "block", border: 0, background: "transparent", color: T.sidebarText, padding: "9px 0 0", cursor: "pointer", fontSize: 10 }}><KeyRound size={11} style={{ verticalAlign: -2, marginRight: 5 }} />Change Password</button>
-            <button onClick={onLogout} style={{ display: "block", border: 0, background: "transparent", color: "#E7A8A2", padding: "8px 0 0", cursor: "pointer", fontSize: 10 }}><LogOut size={11} style={{ verticalAlign: -2, marginRight: 5 }} />Logout</button>
-          </div>
-        </div>
+        </aside>
 
         {/* Content */}
-        <div style={{ flex: 1, minWidth: 0, padding: "22px 26px", overflowX: "auto" }}>
+        <section className="planner-content-column">
+        <header ref={toolbar} className="planner-toolbar" aria-label="Planning utilities">
+          <div className="planner-toolbar-workspace"><span>Workspace</span><strong>{workspaceLabel}</strong></div>
+          <div className={`planner-toolbar-status ${saveState === "error" ? "is-error" : ""}`} role={saveState === "error" ? "alert" : "status"}>
+            {saveState === "saving" ? <Loader2 size={14} className="planner-spin" /> : saveState === "error" ? <AlertTriangle size={14} /> : <CheckCircle2 size={14} />}
+            <span>{saveStatusLabel}</span>
+            {saveError && <button type="button" onClick={() => setSaveRetryVersion((version) => version + 1)}>Retry</button>}
+          </div>
+          <div className={`planner-toolbar-status syspro-${sysproStatus}`} role="status" title={`${stockSnapshotLabel}${stockSource.error ? ` · ${stockSource.error}` : ''}`}>
+            {sysproStatus === "offline" ? <WifiOff size={14} /> : <Wifi size={14} />}
+            <span>SYSPRO {sysproStatusLabel}</span>
+            {sysproStatus !== 'connected' && sysproLastUpdated && <span>· stale stock</span>}
+            {sysproStatus === 'offline' && <button type="button" onClick={() => { refreshSysproStock(); refreshSysproBom(); }}>Retry connection</button>}
+          </div>
+          <div className="planner-toolbar-menus">
+            <div className="planner-utility">
+              <button type="button" className="planner-utility-trigger" aria-expanded={utilityMenu === "planning"} aria-controls="planning-settings-menu" onClick={(event) => toggleUtilityMenu("planning", event.currentTarget)}><Settings2 size={15} /><span>Planning</span><ChevronDown size={13} /></button>
+              {utilityMenu === "planning" && <div id="planning-settings-menu" className="planner-utility-menu" role="group" aria-label="Planning settings">
+                <label htmlFor="toolbar-planning-horizon">Planning horizon</label>
+                <select id="toolbar-planning-horizon" value={horizon} onChange={(event) => setHorizon(normalizePlanningHorizon(event.target.value))}>{PLANNING_HORIZONS.map(value => <option key={value} value={value}>{value} {value === 1 ? "week" : "weeks"}</option>)}</select>
+                <p>Ledger analysis starts at the selected week. Planning, Dashboard, and Production MRP show the active week.</p>
+              </div>}
+            </div>
+            <div className="planner-utility">
+              <button type="button" className="planner-utility-trigger" aria-expanded={utilityMenu === "data"} aria-controls="data-connection-menu" onClick={(event) => toggleUtilityMenu("data", event.currentTarget)}><Database size={15} /><span>Data</span><ChevronDown size={13} /></button>
+              {utilityMenu === "data" && <div id="data-connection-menu" className="planner-utility-menu planner-data-menu" role="group" aria-label="Data and connection">
+                <div className="planner-connection-summary"><strong>SYSPRO stock: {sysproStatusLabel}</strong><span>{stockSnapshotLabel}</span>{stockSource.error && <span className="planner-menu-error">{stockSource.error}</span>}<span>BOM: {connectionLabel(bomSource.phase)}{bomStatus.lastUpdated ? ` · ${bomStatus.connected ? 'refreshed' : 'stale snapshot'} ${bomStatus.lastUpdated.toLocaleString()} · ${bomSource.source}` : ''}</span>{bomStatus.error && <span className="planner-menu-error">{bomStatus.error}</span>}</div>
+                <button type="button" onClick={refreshSysproStock} disabled={stockChecking}><RotateCcw size={14} />{stockChecking ? "Checking SYSPRO stock…" : "Refresh SYSPRO stock"}</button>
+                <div className="planner-menu-separator"><span>Replace dataset</span></div>
+                <button type="button" onClick={resetBlowMolding}><RotateCcw size={14} />Reload Blow Molding data</button>
+                <button type="button" onClick={resetDemo}><RotateCcw size={14} />Load generic demo dataset</button>
+                <p>Dataset replacements require confirmation and are saved through the normal planner save path.</p>
+              </div>}
+            </div>
+            <div className="planner-utility">
+              <button type="button" className="planner-utility-trigger" aria-expanded={utilityMenu === "account"} aria-controls="account-menu" onClick={(event) => toggleUtilityMenu("account", event.currentTarget)}><UserCircle size={16} /><span>Account</span><ChevronDown size={13} /></button>
+              {utilityMenu === "account" && <div id="account-menu" className="planner-utility-menu planner-account-menu" role="group" aria-label="Account">
+                <div className="planner-account-summary"><strong>{currentUser.fullName}</strong><span>{currentUser.role}</span></div>
+                <button type="button" onClick={() => { closeUtilityMenu(false); onChangePassword(); }}><KeyRound size={14} />Change password</button>
+                <button type="button" className="planner-menu-danger" onClick={requestLogout} disabled={loggingOut}><LogOut size={14} />{loggingOut ? "Saving before logout…" : "Logout"}</button>
+                {logoutError && <div className="planner-menu-error" role="alert"><p>{logoutError}</p><button type="button" onClick={requestLogout} disabled={loggingOut}>Retry logout</button></div>}
+              </div>}
+            </div>
+          </div>
+        </header>
+        <main ref={mainContent} className="planner-main" aria-label="Planning workspace" tabIndex={0}>
           {!activeNav && <div style={{ padding: 24, background: "#fff", border: `1px solid ${T.line}` }}><h2>Access denied</h2><p>You do not have permission to view this page.</p><button className="mrp-btn mrp-btn-primary" onClick={() => setTab("dashboard")}>Go to Dashboard</button></div>}
           {activeNav && <>
+          {(isDepartmentDashboard || tab === "fcsd" || tab === "oee") && <button type="button" className="production-overview-back" onClick={() => navigateToTab("dashboard")}>← Back to overview</button>}
+          {Object.hasOwn(UNSUPPORTED_AREAS, tab) && <UnavailableProductionDashboard area={tab} weekStart={activeWeekStart} />}
+          {tab === "fcsd" && <FCSDTracker onDirtyChange={handleFcsdDirtyChange} />}
           {tab === "dashboard" && (
-            <PlannerDashboard planning={planning} productionActuals={productionActuals} productionMrp={productionMrp} materialReconciliation={materialReconciliation} reconciliationAvailable={reconciliationAvailable} sysproStatus={sysproStatus} sysproLastUpdated={sysproLastUpdated} productionLine={selectedProductionLine} />
+            <ProductionOverview planningWeeks={planningWeeks} weekStart={activeWeekStart} productionActuals={productionActuals} onWeekChange={selectPlanningWeek} onOpenLine={openProductionDashboard} onOpenView={openOverviewView} bomStatus={bomStatus} inventoryStatus={sysproStatus} />
+          )}
+          {tab === "line-dashboard" && (
+            <PlannerDashboard planning={planning} productionActuals={productionActuals} productionMrp={productionMrp} materialReconciliation={materialReconciliation} reconciliationAvailable={reconciliationAvailable} productionLine={selectedProductionLine} sheetAnalysis={selectedProductionLine === "thermoforming" ? <SheetAnalysis oeeSettings={oeeSettings} cycleCountDays={cycleCountDays} productionActuals={productionActuals} planningEntries={allThermoPlanningEntries} boms={boms} bomStatus={bomStatus} inventory={sysproInventory} inventoryStatus={sysproStatus} inventoryCapturedAt={sysproLastUpdated} onOpenCycleCount={() => setTab("cycle-count")} onOpenActuals={() => setTab("actuals")} /> : null} />
           )}
           {tab === "production-scrap" && <ProductionScrap />}
           {tab === "oee" && (
@@ -727,17 +853,19 @@ function MRPPlannerCore({ currentUser, users, onSaveUsers, onLogout, onChangePas
               initialPlanningEntryId={oeeInputEntryId}
               oeeHistory={oeeHistory}
               setOeeHistory={setOeeHistory}
+              view={oeeView}
+              onViewChange={setOeeView}
             />
           )}
-          {tab === "planning" && <BlowMouldingPlanningBoard planning={planning} setPlanning={setPlanning} onWeekChange={selectPlanningWeek} logo={atdLogo} items={items} boms={boms} editable={can(currentUser, "planning", "edit")} canAdjust={can(currentUser, "planAdjustments", "edit")} onAdjustPlan={adjustPlanningEntry} currentUserId={currentUser.id} productionLine={selectedProductionLine} bomStatus={bomStatus} onRefreshBom={refreshSysproBom} />}
-          {tab === "actuals" && <ProductionActuals actuals={productionActuals} setActuals={setProductionActuals} planning={planning} onWeekChange={selectPlanningWeek} items={items} boms={boms} sysproTransactions={sysproTransactions} openingWipBalances={openingWipBalances} closingWipBalances={closingWipBalances} tolerances={reconciliationTolerances} editable={can(currentUser, "actuals", "edit")} canAdjust={can(currentUser, "planAdjustments", "edit")} onAdjustPlan={adjustPlanningEntry} onOpenOee={(planningEntryId) => { setOeeInputEntryId(planningEntryId); setTab("oee"); }} users={users} currentUserId={currentUser.id} productionLine={selectedProductionLine} bomStatus={bomStatus} />}
-          {tab === "cycle-count" && <CycleCount days={cycleCountDays} setDays={setCycleCountDays} inventory={sysproInventory} inventoryStatus={sysproStatus} productionLine={selectedProductionLine} users={users} currentUser={currentUser} canSetup={can(currentUser, "cycleCountSetup", "edit")} canCount={can(currentUser, "cycleCount", "edit")} canReopen={can(currentUser, "cycleCountReopen", "edit")} />}
+          {tab === "planning" && <BlowMouldingPlanningBoard planning={planning} setPlanning={setPlanning} onWeekChange={selectPlanningWeek} logo={atdLogo} items={items} boms={boms} editable={can(currentUser, "planning", "edit")} canAdjust={can(currentUser, "planAdjustments", "edit")} onAdjustPlan={adjustPlanningEntry} currentUserId={currentUser.id} productionLine={selectedProductionLine} bomStatus={bomStatus} onRefreshBom={refreshSysproBom} planningWeeks={planningWeeks} importProfiles={planningImportProfiles} excelImportSession={planningExcelImport} onExcelImportSession={setPlanningExcelImport} onImportExcel={importPlanningExcel} />}
+          {tab === "actuals" && <ProductionActuals actuals={productionActuals} setActuals={setProductionActuals} planning={planning} onWeekChange={selectPlanningWeek} items={itemsWithLiveStock} boms={boms} sysproTransactions={sysproTransactions} openingWipBalances={openingWipBalances} closingWipBalances={closingWipBalances} tolerances={reconciliationTolerances} editable={can(currentUser, "actuals", "edit")} canAdjust={can(currentUser, "planAdjustments", "edit")} onAdjustPlan={adjustPlanningEntry} onOpenOee={(planningEntryId) => { setOeeInputEntryId(planningEntryId); setOeeView("input"); setTab("oee"); }} users={users} currentUserId={currentUser.id} productionLine={selectedProductionLine} bomStatus={bomStatus} />}
+          {tab === "cycle-count" && <CycleCount oeeSettings={oeeSettings} days={cycleCountDays} setDays={setCycleCountDays} inventory={sysproInventory} inventoryStatus={sysproStatus} productionLine={selectedProductionLine} users={users} currentUser={currentUser} canSetup={can(currentUser, "cycleCountSetup", "edit")} canCount={can(currentUser, "cycleCount", "edit")} canReopen={can(currentUser, "cycleCountReopen", "edit")} />}
           {tab === "production-mrp" && <ProductionMRP planning={planning} items={itemsWithLiveStock} boms={boms} productionMrp={productionMrp} bomStatus={bomStatus} productionLine={selectedProductionLine} />}
-          {tab === "items" && <ItemsTab inventory={sysproInventory} status={sysproStatus} lastUpdated={sysproLastUpdated} onRefresh={refreshSysproStock} />}
+          {tab === "items" && <ItemsTab inventory={sysproInventory} status={sysproStatus} snapshotLabel={stockSnapshotLabel} />}
           {tab === "bom" && <SysproBomExplorer boms={boms} status={bomStatus} onRefresh={refreshSysproBom} />}
           {tab === "ledger" && (
             <LedgerTab
-              items={items}
+              items={itemsWithLiveStock}
               boms={mrpCompatibleBoms}
               mrp={mrp}
               weeks={weeks}
@@ -747,7 +875,8 @@ function MRPPlannerCore({ currentUser, users, onSaveUsers, onLogout, onChangePas
           )}
           {tab === "users" && <UsersPage users={users} currentUser={currentUser} onSaveUsers={onSaveUsers} />}
           </>}
-        </div>
+        </main>
+        </section>
       </div>
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
     </div>
@@ -1140,7 +1269,7 @@ function PlanningTab({ planning, setPlanning }) {
 /* ---------------------------------------------------------------------- */
 /*  Items                                                                 */
 /* ---------------------------------------------------------------------- */
-function ItemsTab({ inventory, status, lastUpdated, onRefresh }) {
+function ItemsTab({ inventory, status, snapshotLabel }) {
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState({ key: "stockCode", direction: "asc" });
   const columns = [
@@ -1183,18 +1312,18 @@ function ItemsTab({ inventory, status, lastUpdated, onRefresh }) {
 
   return (
     <div>
-      <SectionHeader title="Items" subtitle="SYSPRO material master and current stock position" right={<div style={{ textAlign: "right", fontSize: 11, color: status === "connected" ? "#27734F" : status === "loading" ? T.muted : T.brick }}><b>Source: SYSPRO</b><div>{status === "connected" ? "Connected" : status === "loading" ? "Connecting…" : "Offline"}{lastUpdated ? ` · Last refreshed: ${lastUpdated.toLocaleTimeString()}` : ""}</div></div>} />
+      <SectionHeader title="Items" subtitle="SYSPRO material master and current stock position" />
+      <p role="status">{connectionLabel(status)} · {snapshotLabel}{status !== 'connected' && inventory.length > 0 ? ' · For inspection only; excluded from live stock calculations.' : ''}</p>
       <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 12 }}>
         <input className="mrp-input" style={{ width: "100%", maxWidth: 430 }} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search stock code or description..." aria-label="Search stock code, description, or UOM" />
-        <button className="mrp-btn" onClick={onRefresh} disabled={status === "loading"}><RotateCcw size={13} />{status === "loading" ? "Refreshing…" : "Refresh"}</button>
         <span style={{ color: T.muted, fontSize: 11, whiteSpace: "nowrap" }}>{visibleRows.length.toLocaleString()} items</span>
       </div>
-      <div style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 6, overflow: "hidden", marginBottom: 18 }}>
+      <div className="planner-table-scroll" role="region" aria-label="Inventory table" tabIndex={0} style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 6, marginBottom: 18 }}>
         <table className="mrp-table">
           <thead><tr>{columns.map((column) => <th key={column.key} style={{ textAlign: column.numeric ? "right" : "left" }}><button type="button" onClick={() => changeSort(column.key)} style={{ border: 0, padding: 0, background: "transparent", color: "inherit", font: "inherit", textTransform: "inherit", letterSpacing: "inherit", cursor: "pointer" }}>{column.label}{sort.key === column.key ? (sort.direction === "asc" ? " ↑" : " ↓") : ""}</button></th>)}</tr></thead>
           <tbody>
             {visibleRows.map((item) => <tr key={item.stockCode}><td className="plex-mono">{item.stockCode}</td><td>{item.description}</td><td className="plex-mono">{item.uom || "—"}</td><td className="plex-mono" style={{ textAlign: "right" }}>{formatStock(item.bWip01)}</td><td className="plex-mono" style={{ textAlign: "right" }}>{formatStock(item.bRaw01)}</td><td className="plex-mono" style={{ textAlign: "right" }}>{formatStock(item.bCon01)}</td><td className="plex-mono" style={{ textAlign: "right" }}>{formatStock(item.bChe01)}</td><td className="plex-mono" style={{ textAlign: "right", fontWeight: 600 }}>{formatStock(item.totalOnHand)}</td></tr>)}
-            {!visibleRows.length && <tr><td colSpan={8} style={{ padding: 24, textAlign: "center", color: T.muted }}>{status === "loading" ? "Loading SYSPRO inventory…" : search ? "No materials match your search." : "No SYSPRO inventory data available."}</td></tr>}
+            {!visibleRows.length && <tr><td colSpan={8} style={{ padding: 24, textAlign: "center", color: T.muted }}>{['checking', 'reconnecting'].includes(status) ? "Loading SYSPRO inventory…" : search ? "No materials match your search." : "No SYSPRO inventory data available."}</td></tr>}
           </tbody>
         </table>
       </div>
@@ -1465,17 +1594,19 @@ function LedgerTab({ items, boms, mrp, weeks, ledgerItemId, setLedgerItemId }) {
           </select>
         }
       />
+      <p>Source: current SYSPRO BOM; balances and planning parameters come from saved planning items. Live-only references require an established planning policy.</p>
+      {r?.incomplete && <div role="alert" style={{ background: T.brickTint, color: T.brick, padding: 12 }}><b>Ledger incomplete — requirements are unknown.</b><ul>{r.issues.map((issue) => <li key={issue}>{issue}</li>)}</ul></div>}
 
       {!item ? (
         <div style={{ color: T.muted }}>Add an item to see its planning ledger.</div>
       ) : (
         <>
           <div style={{ display: "flex", gap: 18, marginBottom: 14, fontSize: 12.5, color: T.muted, flexWrap: "wrap" }}>
-            <span><b style={{ color: T.ink }}>{item.type}</b> item</span>
+            <span><b style={{ color: T.ink }}>{item.type || 'Unresolved planning policy'}</b> item</span>
             <span>Lead time: <b className="plex-mono" style={{ color: T.ink }}>{item.leadTimeDays}d</b></span>
             <span>Safety stock: <b className="plex-mono" style={{ color: T.ink }}>{fmtNum(item.safetyStock)}</b></span>
             <span>Lot size: <b className="plex-mono" style={{ color: T.ink }}>{fmtNum(item.lotSize)}</b></span>
-            <span>On hand today: <b className="plex-mono" style={{ color: T.ink }}>{fmtNum(item.onHand)}</b></span>
+            <span>Saved planning balance: <b className="plex-mono" style={{ color: T.ink }}>{fmtNum(item.onHand)} {item.savedPlanningUom || item.uom}</b></span>
             {parentsUsing.length > 0 && <span>Used in: <b className="plex-mono" style={{ color: T.ink }}>{parentsUsing.join(", ")}</b></span>}
           </div>
 

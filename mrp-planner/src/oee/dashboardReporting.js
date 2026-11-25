@@ -124,3 +124,22 @@ export function deriveDowntimeByCategory(rows = []) {
   }));
   return [...totals.entries()].sort((a, b) => b[1] - a[1]).map(([label, downtime]) => ({ label, downtime, count: 1 }));
 }
+
+export function addIdealOeeBenchmark(rows = [], idealOee = 0.75) {
+  const benchmark = numeric(idealOee) ?? 0.75;
+  return rows.map((row) => ({ ...row, idealOee: benchmark }));
+}
+
+export function sortDashboardRows(rows = [], sort = {}) {
+  const key = sort.key || 'date';
+  const direction = sort.direction === 'asc' ? 1 : -1;
+  return [...rows].sort((left, right) => {
+    const a = left?.[key];
+    const b = right?.[key];
+    if (a === b) return String(left?.planningEntryId ?? '').localeCompare(String(right?.planningEntryId ?? ''));
+    if (a === null || a === undefined) return 1;
+    if (b === null || b === undefined) return -1;
+    if (typeof a === 'number' && typeof b === 'number') return (a - b) * direction;
+    return String(a).localeCompare(String(b), undefined, { numeric: true }) * direction;
+  });
+}

@@ -3,7 +3,9 @@
   "private": true,
   "scripts": {
     "install": "npm --prefix mrp-planner install",
-    "dev": "npm --prefix mrp-planner run dev",
+    "dev": "node scripts/dev.cjs",
+    "dev:frontend": "npm --prefix mrp-planner run dev",
+    "test": "node --test tests/*.test.cjs",
     "build": "npm --prefix mrp-planner run build",
     "preview": "npm --prefix mrp-planner run preview",
     "server": "node server/server.js"
