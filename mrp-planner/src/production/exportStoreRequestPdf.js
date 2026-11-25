@@ -1,4 +1,5 @@
 import { jsPDF } from "jspdf";
+import { canExportStoreRequest } from './storeRequestValidation.js';
 
 const columns = [
   ["Stock Code", 23, "stockCode"], ["Description", 59, "description"], ["UOM", 14, "uom"],
@@ -16,7 +17,8 @@ async function imageDataUrl(url) {
   return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(blob); });
 }
 
-export async function exportStoreRequestPdf({ storeRequests, planningWeek, productionLineName = "Blow Moulding", logoUrl, logoDataUrl }) {
+export async function exportStoreRequestPdf({ storeRequests, complete, dataIssues = [], planningWeek, productionLineName = "Blow Moulding", logoUrl, logoDataUrl }) {
+  if (!canExportStoreRequest({ storeRequests, complete, dataIssues })) throw new Error('Store request is incomplete; unresolved BOM or material requirements cannot be exported as a complete request.');
   const pdf = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
   const logo = logoDataUrl || await imageDataUrl(logoUrl);
   const margin = 8, pageWidth = pdf.internal.pageSize.getWidth(), pageHeight = pdf.internal.pageSize.getHeight();

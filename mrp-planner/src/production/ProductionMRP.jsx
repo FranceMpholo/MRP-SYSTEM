@@ -3,6 +3,8 @@ import { Boxes, ClipboardList, Download, PackageCheck } from "lucide-react";
 import { deriveProductionMRP } from "./deriveProductionMRP";
 import { PRODUCTION_LINES } from "./productionLines";
 import atdLogo from "../assets/atd-logo.png";
+import { canExportStoreRequest } from './storeRequestValidation.js';
+import { bomSourceReady } from '../bom/bomValidation.js';
 
 const colors = {
   ink: "#1B2430", card: "#FFFFFF", line: "#E3DFD2", muted: "#746C5C",
@@ -31,7 +33,7 @@ function Empty({ children, columns }) {
 }
 
 function Status({ child }) {
-  const exception = child.status === "Insufficient RAW stock" || child.status === "Pack size missing";
+  const exception = !['No request required', 'Ready to request'].includes(child.status);
   return <div>
     <span style={{ display: "inline-block", padding: "3px 7px", borderRadius: 3, fontSize: 11, fontWeight: 600, background: exception ? colors.brickTint : colors.greenTint, color: exception ? colors.brick : colors.green }}>{child.status}</span>
     {child.rawShortage > 0 && <div className="plex-mono" style={{ color: colors.brick, fontSize: 11, fontWeight: 600, marginTop: 3 }}>RAW shortage: {fmt(child.rawShortage)} {child.uom}</div>}
@@ -40,12 +42,17 @@ function Status({ child }) {
 
 export default function ProductionMRP({ planning, items, boms, productionMrp, bomStatus, productionLine = "blowMoulding" }) {
   const [exporting, setExporting] = useState(false);
-  const productionMRP = useMemo(() => productionMrp || deriveProductionMRP({ planning, items, boms }), [productionMrp, planning, items, boms]);
+  const productionMRP = useMemo(() => productionMrp || deriveProductionMRP({ planning, items, boms, bomAvailable: bomSourceReady(bomStatus) }), [productionMrp, planning, items, boms, bomStatus]);
   const { productionPlan, childRequirements, storeRequests } = productionMRP;
   const planningWeek = planning?.weekStart || "—";
+  const exportReady = canExportStoreRequest(productionMRP) && bomSourceReady(bomStatus);
+  const [exportError, setExportError] = useState('');
   async function downloadStoreRequest() {
+    if (!exportReady) return;
+    setExportError('');
     setExporting(true);
-    try { const { exportStoreRequestPdf } = await import("./exportStoreRequestPdf"); await exportStoreRequestPdf({ storeRequests, planningWeek, productionLineName: PRODUCTION_LINES[productionLine]?.name || "Blow Moulding", logoUrl: atdLogo }); }
+    try { const { exportStoreRequestPdf } = await import("./exportStoreRequestPdf"); await exportStoreRequestPdf({ storeRequests, complete: productionMRP.complete, dataIssues: productionMRP.dataIssues, planningWeek, productionLineName: PRODUCTION_LINES[productionLine]?.name || "Blow Moulding", logoUrl: atdLogo }); }
+    catch (error) { setExportError(error.message || 'Store request export failed.'); }
     finally { setExporting(false); }
   }
 
@@ -54,8 +61,19 @@ export default function ProductionMRP({ planning, items, boms, productionMrp, bo
       <div style={{ color: colors.ink, fontSize: 22, fontWeight: 600 }}>Production MRP</div>
       <div style={{ color: colors.muted, fontSize: 13, marginTop: 3 }}>Direct child material requirements for the selected production plan week.</div>
     </div>
-    {bomStatus && !bomStatus.connected && <div style={{ background: colors.brickTint, color: colors.brick, padding: 10, borderRadius: 4, fontWeight: 600 }}>Syspro BOM unavailable{bomStatus.error ? `: ${bomStatus.error}` : ""}</div>}
-    {(productionMRP.dataIssues || []).map((issue) => <div key={issue} style={{ background: colors.brickTint, color: colors.brick, padding: 10, borderRadius: 4, fontWeight: 600 }}>{issue}</div>)}
+    {bomStatus?.loading ? (
+      <div role="status" style={{ background: colors.copperTint, color: colors.copper, padding: 10, borderRadius: 4, fontWeight: 600 }}>Loading SYSPRO BOM…</div>
+    ) : bomStatus && !bomStatus.connected ? (
+      <div role="alert" style={{ background: colors.brickTint, color: colors.brick, padding: 10, borderRadius: 4, fontWeight: 600 }}>SYSPRO BOM unavailable{bomStatus.error ? `: ${bomStatus.error}` : ""}</div>
+    ) : null}
+    {(productionMRP.dataIssues || []).filter((issue) => !issue.startsWith('SYSPRO BOM unavailable or refreshing')).map((issue) => (
+      <div key={issue} style={{ background: colors.brickTint, color: colors.brick, padding: 10, borderRadius: 4, fontWeight: 600 }}>{issue}</div>
+    ))}
+    {(productionMRP.dataWarnings || []).map((warning) => <div key={warning} role="status">{warning}</div>)}
+    {!exportReady && bomSourceReady(bomStatus) && (
+      <div role="status" style={{ color: colors.brick }}>Material request incomplete. Resolve BOM, unit, stock and pack-size issues before exporting.</div>
+    )}
+    {exportError && <div role="alert">{exportError}</div>}
 
     <Section title="Production plan" subtitle={`Planning week: ${planningWeek}`} icon={ClipboardList}>
       <div style={{ overflowX: "auto" }}><table className="mrp-table" style={{ minWidth: 620 }}>
@@ -67,14 +85,14 @@ export default function ProductionMRP({ planning, items, boms, productionMrp, bo
     <Section title="Production material requirements" subtitle="Direct BOM components netted only against current Production stock in B-WIP01." icon={Boxes}>
       <div style={{ overflowX: "auto" }}><table className="mrp-table" style={{ minWidth: 930 }}>
         <thead><tr><th>Child stock code</th><th>Description</th><th>UOM</th><th style={{ textAlign: "right" }}>Gross requirement</th><th style={{ textAlign: "right" }}>B-WIP01 SOH</th><th style={{ textAlign: "right" }}>Production shortfall</th></tr></thead>
-        <tbody>{childRequirements.map((child) => <tr key={child.childId}><td className="plex-mono" style={{ fontWeight: 600 }}>{child.stockCode}</td><td>{child.description}</td><td className="plex-mono">{child.uom || "—"}</td><td className="plex-mono" style={{ textAlign: "right" }}>{fmt(child.grossRequirement)}</td><td className="plex-mono" style={{ textAlign: "right" }}>{fmt(child.bWip01Soh)}</td><td className="plex-mono" style={{ textAlign: "right", fontWeight: 600, color: child.productionShortfall > 0 ? colors.brick : colors.green }}>{fmt(child.productionShortfall)}</td></tr>)}{!childRequirements.length && <Empty columns={6}>No direct BOM components are required for the current Production Plan.</Empty>}</tbody>
+        <tbody>{childRequirements.map((child) => <tr key={child.childId}><td className="plex-mono" style={{ fontWeight: 600 }}>{child.stockCode}</td><td>{child.description}</td><td className="plex-mono">{child.uom || "—"}</td><td className="plex-mono" style={{ textAlign: "right" }}>{fmt(child.grossRequirement)}</td><td className="plex-mono" style={{ textAlign: "right" }}>{fmt(child.bWip01Soh)}</td><td className="plex-mono" style={{ textAlign: "right", fontWeight: 600, color: child.productionShortfall > 0 ? colors.brick : colors.green }}>{fmt(child.productionShortfall)}</td></tr>)}{!childRequirements.length && <Empty columns={6}>{productionMRP.complete ? 'No direct BOM components are required for the current Production Plan.' : 'Material requirements cannot be established from the current BOM inputs.'}</Empty>}</tbody>
       </table></div>
     </Section>
 
-    <Section title="Store request — B-RAW01" subtitle="Requests are rounded to pack size; B-RAW01 tests whether Stores can fulfil the request." icon={PackageCheck} action={<button className="mrp-btn mrp-btn-primary" disabled={exporting} onClick={downloadStoreRequest}><Download size={15} /> {exporting ? "Generating…" : "Download PDF"}</button>}>
+    <Section title="Store request — B-RAW01" subtitle="Requests are rounded to saved pack size and checked against live stock. Unresolved materials remain listed; incomplete export is blocked." icon={PackageCheck} action={<button className="mrp-btn mrp-btn-primary" disabled={exporting || !exportReady} onClick={downloadStoreRequest}><Download size={15} /> {exporting ? "Generating…" : "Download PDF"}</button>}>
       <div style={{ overflowX: "auto" }}><table className="mrp-table" style={{ minWidth: 1080 }}>
         <thead><tr><th>Child stock code</th><th>Description</th><th>UOM</th><th style={{ textAlign: "right" }}>Production shortfall</th><th style={{ textAlign: "right" }}>Pack size</th><th style={{ textAlign: "right" }}>Packs required</th><th style={{ textAlign: "right" }}>Store request qty</th><th style={{ textAlign: "right" }}>B-RAW01 SOH</th><th style={{ textAlign: "right" }}>Projected RAW balance</th><th>Status</th></tr></thead>
-        <tbody>{storeRequests.map((child) => <tr key={child.childId}><td className="plex-mono" style={{ fontWeight: 600 }}>{child.stockCode}</td><td>{child.description}</td><td className="plex-mono">{child.uom || "—"}</td><td className="plex-mono" style={{ textAlign: "right" }}>{fmt(child.productionShortfall)}</td><td className="plex-mono" style={{ textAlign: "right" }}>{fmt(child.packSize)}</td><td className="plex-mono" style={{ textAlign: "right" }}>{fmt(child.packsRequired)}</td><td className="plex-mono" style={{ textAlign: "right", fontWeight: 600 }}>{fmt(child.storeRequestQty)}</td><td className="plex-mono" style={{ textAlign: "right" }}>{fmt(child.bRaw01Soh)}</td><td className="plex-mono" style={{ textAlign: "right", color: child.projectedRawBalance < 0 ? colors.brick : colors.ink }}>{fmt(child.projectedRawBalance)}</td><td><Status child={child} /></td></tr>)}{!storeRequests.length && <Empty columns={10}>No Store requests are required from B-RAW01 for this Production Plan.</Empty>}</tbody>
+        <tbody>{storeRequests.map((child) => <tr key={child.childId}><td className="plex-mono" style={{ fontWeight: 600 }}>{child.stockCode}</td><td>{child.description}</td><td className="plex-mono">{child.uom || "—"}</td><td className="plex-mono" style={{ textAlign: "right" }}>{fmt(child.productionShortfall)}</td><td className="plex-mono" style={{ textAlign: "right" }}>{fmt(child.packSize)}</td><td className="plex-mono" style={{ textAlign: "right" }}>{fmt(child.packsRequired)}</td><td className="plex-mono" style={{ textAlign: "right", fontWeight: 600 }}>{fmt(child.storeRequestQty)}</td><td className="plex-mono" style={{ textAlign: "right" }}>{fmt(child.bRaw01Soh)}</td><td className="plex-mono" style={{ textAlign: "right", color: child.projectedRawBalance < 0 ? colors.brick : colors.ink }}>{fmt(child.projectedRawBalance)}</td><td><Status child={child} /></td></tr>)}{!storeRequests.length && <Empty columns={10}>{productionMRP.complete ? "No Store requests are required from B-RAW01 for this Production Plan." : "Store requests are unresolved; no complete request can be issued."}</Empty>}</tbody>
       </table></div>
     </Section>
   </div>;

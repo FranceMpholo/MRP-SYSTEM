@@ -1,5 +1,7 @@
 const express = require("express");
 const db = require("../db");
+const { mapBomRow } = require('../bomMapping');
+const { sendFailure } = require('../sysproErrors');
 
 const router = express.Router();
 const INVENTORY_SQL = `
@@ -18,40 +20,58 @@ LEFT JOIN InvWarehouse iw
 GROUP BY im.StockCode, im.Description, im.StockUom
 ORDER BY im.StockCode;
 `;
+// The query-local hash hint avoids the measured slow plan for the normalized
+// joins without changing their matching, source rows or ordering. See docs/bom-performance.md.
 const BOM_SQL = `
 SELECT
     bom.ParentPart,
+    parent.StockCode AS ParentMasterCode,
     parent.Description AS ParentDescription,
+    parent.StockUom AS ParentUom,
     bom.Component,
+    child.StockCode AS ComponentMasterCode,
     child.Description AS ComponentDescription,
-    bom.QtyPer
+    child.StockUom AS ComponentUom,
+    bom.QtyPer, bom.QtyPerEnt, bom.UomFlag,
+    bom.Route, bom.SequenceNum, bom.Version, bom.Release, bom.ComVersion, bom.ComRelease,
+    bom.StructureOnDate, bom.StructureOffDate, bom.FixedQtyPerFlag, bom.FixedQtyPer
 FROM BomStructure bom
-LEFT JOIN InvMaster parent ON parent.StockCode = bom.ParentPart
-LEFT JOIN InvMaster child ON child.StockCode = bom.Component
-ORDER BY bom.ParentPart, bom.Component;
+LEFT JOIN InvMaster parent ON UPPER(LTRIM(RTRIM(parent.StockCode))) = UPPER(LTRIM(RTRIM(bom.ParentPart)))
+LEFT JOIN InvMaster child ON UPPER(LTRIM(RTRIM(child.StockCode))) = UPPER(LTRIM(RTRIM(bom.Component)))
+ORDER BY bom.ParentPart, bom.Route, bom.Version, bom.Release, bom.SequenceNum, bom.Component
+OPTION (HASH JOIN);
 `;
 
-const value = (row, ...names) => { const key = Object.keys(row).find((candidate) => names.some((name) => candidate.toLowerCase() === name.toLowerCase())); return key ? row[key] : null; };
+const finiteQtyPer = (rawQtyPer) => {
+  if (rawQtyPer === null || rawQtyPer === undefined || (typeof rawQtyPer === "string" && rawQtyPer.trim() === "")) return null;
+  const qtyPer = Number(rawQtyPer);
+  return Number.isFinite(qtyPer) ? qtyPer : null;
+};
 
 router.get("/inventory", async (_request, response) => {
+  response.set('Cache-Control', 'no-store');
   try {
     const rows = await db.query(INVENTORY_SQL);
-    response.json({ success: true, count: rows.length, data: rows });
+    response.json({ success: true, count: rows.length, data: rows, source: 'SYSPRO InvMaster / InvWarehouse', fetchedAt: new Date().toISOString() });
   } catch (error) {
-    console.error("Syspro inventory read failed:", error.message);
-    response.status(503).json({ success: false, error: "Syspro inventory is unavailable." });
+    sendFailure(response, error, 'SYSPRO inventory read');
   }
 });
 
 router.get("/bom", async (_request, response) => {
+  response.set('Cache-Control', 'no-store');
   try {
     const rows = await db.query(BOM_SQL);
-    const data = rows.map((row) => ({ parentStockCode: String(value(row, "ParentPart") || "").trim(), parentDescription: String(value(row, "ParentDescription") || "").trim(), componentStockCode: String(value(row, "Component") || "").trim(), componentDescription: String(value(row, "ComponentDescription") || "").trim(), qtyPer: Number(value(row, "QtyPer")) || 0 })).filter((row) => row.parentStockCode && row.componentStockCode);
-    response.json({ success: true, count: data.length, parentCount: new Set(data.map((row) => row.parentStockCode.toUpperCase())).size, data });
+    const data = rows.map(mapBomRow);
+    response.json({ success: true, count: data.length, parentCount: new Set(data.map((row) => row.parentStockCode.toUpperCase())).size, data,
+      source: 'SYSPRO BomStructure, all returned structures; none selected or merged', fetchedAt: new Date().toISOString(),
+      structureSelection: 'unresolved', quantityBasis: 'QtyPer stocking quantities; QtyPerEnt is retained separately' });
   } catch (error) {
-    console.error("Syspro BOM read failed:", error.message);
-    response.status(503).json({ success: false, error: "Syspro BOM is unavailable." });
+    sendFailure(response, error, 'SYSPRO BOM read');
   }
 });
 
 module.exports = router;
+module.exports.finiteQtyPer = finiteQtyPer;
+module.exports.mapBomRow = mapBomRow;
+module.exports.BOM_SQL = BOM_SQL;
